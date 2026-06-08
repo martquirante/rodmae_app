@@ -15,12 +15,14 @@ import '../models/couple_location.dart';
 import 'map_screen.dart';
 import '../services/auth_service.dart';
 import '../services/firebase_service.dart';
+import '../services/notification_service.dart';
 import '../services/supabase_service.dart';
 import '../widgets/glass_card.dart';
 import '../widgets/primary_button.dart';
 import '../widgets/common_widgets.dart';
 import '../widgets/love_overlay.dart';
 import '../widgets/isometric_markers.dart';
+import '../widgets/cinematic_envelope.dart';
 
 class HomeDashboardScreen extends StatefulWidget {
   final AppStartupStatus startup;
@@ -65,20 +67,36 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen>
 
   static const loveTriggers = <LoveTrigger>[
     LoveTrigger(
-      title: 'Miss You',
-      subtitle: 'Hearts Shower',
-      icon: Icons.favorite_rounded,
-      color: RodMaeColors.rose,
-      animationAsset: 'assets/animations/hearts.json',
-      overlayTitle: 'Miss-you signal sent',
-    ),
-    LoveTrigger(
       title: 'I Love You',
-      subtitle: 'Hearts Shower',
+      subtitle: 'Ruby Glass Hearts',
       icon: Icons.favorite_rounded,
       color: RodMaeColors.rose,
       animationAsset: 'assets/animations/hearts.json',
       overlayTitle: 'I-love-you signal sent',
+    ),
+    LoveTrigger(
+      title: 'Miss You',
+      subtitle: 'Bioluminescent Orbs',
+      icon: Icons.blur_circular_rounded,
+      color: RodMaeColors.violet,
+      animationAsset: 'assets/animations/hearts.json',
+      overlayTitle: 'Miss-you signal sent',
+    ),
+    LoveTrigger(
+      title: 'Flying Kiss',
+      subtitle: 'Neon Sonic Rings',
+      icon: Icons.radio_button_checked_rounded,
+      color: RodMaeColors.rose,
+      animationAsset: 'assets/animations/kiss.json',
+      overlayTitle: 'Flying kiss delivered',
+    ),
+    LoveTrigger(
+      title: 'Warm Embrace',
+      subtitle: 'Golden Stardust Aurora',
+      icon: Icons.auto_awesome_rounded,
+      color: RodMaeColors.gold,
+      animationAsset: 'assets/animations/note.json',
+      overlayTitle: 'Warm embrace delivered',
     ),
     LoveTrigger(
       title: 'Heading Home',
@@ -87,14 +105,6 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen>
       color: RodMaeColors.mint,
       animationAsset: 'assets/animations/home.json',
       overlayTitle: 'Home route shared',
-    ),
-    LoveTrigger(
-      title: 'Flying Kiss',
-      subtitle: 'Heartbeat',
-      icon: Icons.favorite_border_rounded,
-      color: RodMaeColors.gold,
-      animationAsset: 'assets/animations/kiss.json',
-      overlayTitle: 'Flying kiss delivered',
     ),
     LoveTrigger(
       title: 'Surprise Note',
@@ -124,15 +134,49 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen>
     super.dispose();
   }
 
-  void _triggerLove(LoveTrigger trigger) {
-    HapticFeedback.mediumImpact();
+  Future<void> _triggerLove(LoveTrigger trigger) async {
+    HapticFeedback.heavyImpact();
     setState(() => _activeTrigger = trigger);
     _lottieController
       ..reset()
       ..forward();
-    // Save to triggers database history
-    SupabaseWeddingRepository.instance.insertLoveTrigger(trigger.title);
-    // "Heading Home" auto-opens map with routing pre-loaded
+
+    final sender = PartnerIdentity.active.value.label;
+    if (!AppRuntime.supabaseReady) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Love signal shown locally. Supabase is offline, so spouse delivery is paused.',
+            ),
+          ),
+        );
+      }
+      return;
+    }
+
+    try {
+      await SupabaseWeddingRepository.instance.insertLoveTrigger(trigger.title);
+      await NotificationService.sendPushToSpouse(
+        title: '$sender sent a love signal',
+        body: trigger.title,
+        type: 'signal',
+        sender: sender,
+        triggerType: trigger.title,
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${trigger.title} sent to your spouse.')),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Love signal failed to sync: $error')),
+        );
+      }
+    }
+
     if (trigger.title == 'Heading Home') {
       Future.delayed(const Duration(milliseconds: 800), () {
         if (mounted) {
@@ -239,11 +283,15 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen>
                           final text = controller.text.trim();
                           if (text.isNotEmpty) {
                             Navigator.of(context).pop();
+                            final messenger = ScaffoldMessenger.of(context);
+                            showSurpriseNoteSendAnimation(context);
                             try {
                               await SupabaseWeddingRepository.instance.insertSurpriseNote(text);
-                              _triggerLove(trigger);
+                              messenger.showSnackBar(
+                                const SnackBar(content: Text('Surprise note sent to your spouse!')),
+                              );
                             } catch (e) {
-                              ScaffoldMessenger.of(context).showSnackBar(
+                              messenger.showSnackBar(
                                 SnackBar(content: Text('Failed to send note: $e')),
                               );
                             }

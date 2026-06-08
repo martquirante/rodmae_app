@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 final class AppConfig {
   AppConfig._();
 
-  static const String coupleId = 'couple-rodmae-2026';
+  static const String coupleId = 'couple-rodel-marymae-2026';
   static const String vaultBucket = 'rodmae-vault';
   static const String geminiApiKey = 'YOUR_GEMINI_API_KEY';
   static const String supabaseUrl = 'https://axqbpjafmlwvqnhodtph.supabase.co';

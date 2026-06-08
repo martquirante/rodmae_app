@@ -27,14 +27,14 @@ class CoupleSettings {
 
   factory CoupleSettings.defaults() => CoupleSettings(
     id: '',
-    coupleId: 'couple-rodmae-2026',
+    coupleId: 'couple-rodel-marymae-2026',
     updatedAt: DateTime.now(),
   );
 
   factory CoupleSettings.fromMap(Map<String, dynamic> map) {
     return CoupleSettings(
       id: map['id']?.toString() ?? '',
-      coupleId: map['couple_id']?.toString() ?? 'couple-rodmae-2026',
+      coupleId: map['couple_id']?.toString() ?? 'couple-rodel-marymae-2026',
       coupleNickname: map['couple_nickname']?.toString(),
       notifLoveSignals: map['notif_love_signals'] as bool? ?? true,
       notifSweetNotes: map['notif_sweet_notes'] as bool? ?? true,

@@ -7,12 +7,13 @@ import 'package:latlong2/latlong.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../core/theme.dart';
-import '../core/animations.dart';
 import '../core/constants.dart';
 import '../models/couple_location.dart';
 import '../services/supabase_service.dart';
 import '../services/auth_service.dart';
+import '../services/firebase_service.dart';
 import '../widgets/animated_3d_card.dart';
 import '../widgets/glass_card.dart';
 import '../widgets/isometric_markers.dart';
@@ -86,6 +87,22 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   bool _isReverseGeocoding = false;
   String? _myAvatarUrl;
   String? _spouseAvatarUrl;
+
+  // ── Presence tracking ────────────────────────────────────────────────────
+  DateTime? _spouseLastSeen;
+  bool _isSpouseOnline = false;
+
+  // ── Smooth lerp animation for spouse marker ──────────────────────────────
+  LatLng? _spouseFromLoc;    // lerp start position
+  LatLng? _spouseTargetLoc;  // lerp end / current target
+  AnimationController? _spouseLerpController;
+
+  // ── Timers ───────────────────────────────────────────────────────────────
+  Timer? _heartbeatTimer;
+  Timer? _presenceRefreshTimer;
+
+  // ── Supabase Realtime broadcast channel for < 100 ms location delivery ───
+  RealtimeChannel? _locationBroadcastChannel;
 
   void _onSearchChanged(String query) {
     if (_debounce?.isActive ?? false) _debounce!.cancel();
@@ -180,18 +197,52 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+
+    // Smooth lerp controller for spouse marker movement (60 fps rebuild)
+    _spouseLerpController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 650),
+    );
+    _spouseLerpController!.addListener(() {
+      if (mounted) setState(() {});
+    });
+
+    // 30-second heartbeat so the partner always sees an up-to-date last-seen
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      final me = PartnerIdentity.active.value.label;
+      SupabaseWeddingRepository.instance
+          .updatePresenceHeartbeat(me)
+          .catchError((_) {});
+      // Also re-broadcast position over Realtime for sub-100 ms partners
+      if (_myLocation != null) _broadcastLocation(_myLocation!);
+    });
+
+    // Refresh the online/offline indicator every 15 s
+    _presenceRefreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (mounted) {
+        setState(() {
+          _isSpouseOnline = _spouseLastSeen != null &&
+              DateTime.now()
+                  .difference(_spouseLastSeen!)
+                  .inSeconds < 90;
+        });
+      }
+    });
+
     _requestPermissionAndTrack();
     _listenToSpouseAndStaticLocations();
+    _subscribeToBroadcast();
     _loadUserAvatars();
+
     if (widget.autoHeadingHome) {
-      // Wait for GPS + DB data to load, then auto-fetch route home
       Future.delayed(const Duration(seconds: 3), () {
         if (mounted && _myLocation != null && _homeLocation != null) {
           _fetchRoute(_myLocation!, _homeLocation!).then((_) {
             if (mounted) _showTransitSelectionBottomSheet();
           });
         } else if (mounted) {
-          _showErrorSnackBar('Set your Home location first to use Heading Home routing.');
+          _showErrorSnackBar(
+              'Set your Home location first to use Heading Home routing.');
         }
       });
     }
@@ -202,8 +253,12 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     _positionStreamSub?.cancel();
     _locationsSub?.cancel();
     _transitSimController?.dispose();
+    _spouseLerpController?.dispose();
     _searchController.dispose();
     _debounce?.cancel();
+    _heartbeatTimer?.cancel();
+    _presenceRefreshTimer?.cancel();
+    _unsubscribeBroadcast();
     super.dispose();
   }
 
@@ -264,11 +319,13 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
 
   // Listen to Database Locations (Spouse position + pinned Home/Work)
   void _listenToSpouseAndStaticLocations() {
-    _locationsSub = SupabaseWeddingRepository.instance.watchLocations().listen((locations) {
+    _locationsSub =
+        SupabaseWeddingRepository.instance.watchLocations().listen((locations) {
       if (!mounted) return;
       final currentPartner = PartnerIdentity.active.value.label;
-      
+
       LatLng? newSpouseLoc;
+      DateTime? newSpouseLastSeen;
       LatLng? newHomeLoc;
       LatLng? newMyWork;
       LatLng? newSpouseWork;
@@ -280,6 +337,8 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       for (final loc in locations) {
         if (loc.locationType == 'live' && loc.partner != currentPartner) {
           newSpouseLoc = loc.position;
+          // Use the DB updated_at as fallback last-seen (broadcast is faster)
+          newSpouseLastSeen = loc.updatedAt;
         } else if (loc.locationType == 'home') {
           newHomeLoc = loc.position;
           if (loc.locationName != null && loc.locationName!.isNotEmpty) {
@@ -301,7 +360,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       }
 
       setState(() {
-        _spouseLocation = newSpouseLoc;
         _homeLocation = newHomeLoc;
         _myWorkLocation = newMyWork;
         _spouseWorkLocation = newSpouseWork;
@@ -309,10 +367,14 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         if (newMyWorkName != null) _myWorkLocationName = newMyWorkName;
         if (newSpouseWorkName != null) _spouseWorkLocationName = newSpouseWorkName;
       });
-      // Recover PFPs dynamically if they are uploaded while map is open
-      if (_myAvatarUrl == null || _spouseAvatarUrl == null) {
-        _loadUserAvatars();
+
+      // Animate spouse to new DB position (broadcast may have already handled it)
+      if (newSpouseLoc != null) {
+        _spouseLocation = newSpouseLoc; // keep for Focus/Pin backwards compat
+        _onNewSpouseLocation(newSpouseLoc, newSpouseLastSeen);
       }
+
+      if (_myAvatarUrl == null || _spouseAvatarUrl == null) _loadUserAvatars();
     });
   }
 
@@ -327,6 +389,123 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       updatedAt: DateTime.now(),
     );
     await SupabaseWeddingRepository.instance.upsertLocation(loc);
+    // Also push a Realtime broadcast for sub-100 ms delivery on the partner's device
+    _broadcastLocation(pos);
+  }
+
+  // ── Realtime Broadcast helpers ────────────────────────────────────────────
+
+  void _subscribeToBroadcast() {
+    if (!AppRuntime.supabaseReady) return;
+    try {
+      _locationBroadcastChannel = Supabase.instance.client
+          .channel('location:${AppConfig.coupleId}');
+
+      _locationBroadcastChannel!
+          .onBroadcast(
+            event: 'gps',
+            callback: (payload) {
+              if (!mounted) return;
+              final sender = payload['sender']?.toString() ?? '';
+              final me = PartnerIdentity.active.value.label;
+              // Ignore my own broadcast echoes
+              if (sender.toLowerCase() == me.toLowerCase()) return;
+
+              final lat = (payload['lat'] as num?)?.toDouble();
+              final lon = (payload['lon'] as num?)?.toDouble();
+              if (lat == null || lon == null) return;
+
+              final ts = DateTime.tryParse(payload['ts']?.toString() ?? '') ??
+                  DateTime.now().toUtc();
+
+              _spouseLocation = LatLng(lat, lon); // keep for Focus/Pin
+              _onNewSpouseLocation(LatLng(lat, lon), ts);
+            },
+          )
+          .subscribe();
+    } catch (_) {}
+  }
+
+  void _unsubscribeBroadcast() {
+    try {
+      _locationBroadcastChannel?.unsubscribe();
+    } catch (_) {}
+    _locationBroadcastChannel = null;
+  }
+
+  void _broadcastLocation(LatLng pos) {
+    try {
+      _locationBroadcastChannel?.sendBroadcastMessage(
+        event: 'gps',
+        payload: {
+          'sender': PartnerIdentity.active.value.label,
+          'lat': pos.latitude,
+          'lon': pos.longitude,
+          'ts': DateTime.now().toUtc().toIso8601String(),
+        },
+      );
+    } catch (_) {}
+  }
+
+  // ── Spouse marker lerp ────────────────────────────────────────────────────
+
+  /// Called whenever a new spouse location arrives (DB stream OR broadcast).
+  /// Smoothly interpolates the map marker from the previous to the new position.
+  void _onNewSpouseLocation(LatLng newLoc, DateTime? lastSeen) {
+    if (!mounted) return;
+    final ctrl = _spouseLerpController;
+    if (ctrl == null) {
+      setState(() {
+        _spouseFromLoc = newLoc;
+        _spouseTargetLoc = newLoc;
+      });
+      return;
+    }
+
+    // Mid-animation? Compute current interpolated position as new start.
+    LatLng from;
+    if (_spouseFromLoc != null &&
+        _spouseTargetLoc != null &&
+        ctrl.isAnimating) {
+      final t = Curves.easeOutCubic.transform(ctrl.value.clamp(0.0, 1.0));
+      from = LatLng(
+        _spouseFromLoc!.latitude +
+            (_spouseTargetLoc!.latitude - _spouseFromLoc!.latitude) * t,
+        _spouseFromLoc!.longitude +
+            (_spouseTargetLoc!.longitude - _spouseFromLoc!.longitude) * t,
+      );
+    } else {
+      from = _spouseTargetLoc ?? newLoc;
+    }
+
+    // Only update last-seen if this timestamp is newer
+    final effectiveLastSeen = lastSeen?.toLocal() ?? DateTime.now();
+    final isNewer = _spouseLastSeen == null ||
+        effectiveLastSeen.isAfter(_spouseLastSeen!);
+
+    setState(() {
+      _spouseFromLoc = from;
+      _spouseTargetLoc = newLoc;
+      if (isNewer) {
+        _spouseLastSeen = effectiveLastSeen;
+        _isSpouseOnline = DateTime.now()
+                .difference(effectiveLastSeen)
+                .inSeconds <
+            90;
+      }
+    });
+
+    ctrl.forward(from: 0);
+  }
+
+  // ── Presence helpers ─────────────────────────────────────────────────────
+
+  String _timeAgo(DateTime dt) {
+    final diff = DateTime.now().difference(dt);
+    if (diff.inSeconds < 60) return 'just now';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
+    if (diff.inHours < 24) return '${diff.inHours}h ago';
+    return '${diff.inDays}d ago';
   }
 
   // nominatim search
@@ -431,7 +610,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     }
 
     // Trigger love signal to other spouse
-    SupabaseWeddingRepository.instance.insertLoveTrigger('Heading Home');
+    SupabaseWeddingRepository.instance
+        .insertLoveTrigger('Heading Home')
+        .catchError((_) {});
 
     _transitSimController?.dispose();
     setState(() {
@@ -508,41 +689,68 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     
-    // Build list of markers
+    // ── Build markers ────────────────────────────────────────────────────
     final markers = <Marker>[];
 
-    // User marker
-    if (_myLocation != null) {
+    // Compute smooth lerped spouse render position
+    LatLng? spouseRenderPos;
+    if (_spouseFromLoc != null &&
+        _spouseTargetLoc != null &&
+        _spouseLerpController != null) {
+      final t = Curves.easeOutCubic
+          .transform(_spouseLerpController!.value.clamp(0.0, 1.0));
+      spouseRenderPos = LatLng(
+        _spouseFromLoc!.latitude +
+            (_spouseTargetLoc!.latitude - _spouseFromLoc!.latitude) * t,
+        _spouseFromLoc!.longitude +
+            (_spouseTargetLoc!.longitude - _spouseFromLoc!.longitude) * t,
+      );
+    } else {
+      spouseRenderPos = _spouseTargetLoc;
+    }
+
+    final myName = PartnerIdentity.active.value.label;
+    final spouseName = PartnerIdentity.active.value == PartnerProfile.rodel
+        ? PartnerProfile.maryMae.label
+        : PartnerProfile.rodel.label;
+
+    // My marker (always online while visible)
+    if (_myLocation != null && !_isSimulatingTransit) {
       markers.add(
         Marker(
           point: _myLocation!,
-          width: 58,
-          height: 58,
-          child: _isSimulatingTransit
-              ? const SizedBox.shrink() // Hide user when vehicle animation is active
-              : PulseGlow(
-                  glowColor: RodMaeColors.electricBlue,
-                  child: _buildUserMarker(PartnerIdentity.active.value.label, true),
-                ),
+          width: 92,
+          height: 116,
+          alignment: Alignment.topCenter,
+          child: PersonGameMarker(
+            name: myName,
+            markerColor: RodMaeColors.electricBlue,
+            presence: PresenceStatus.online,
+            avatarUrl: _myAvatarUrl,
+            initials: myName.substring(0, 1),
+            isMe: true,
+          ),
         ),
       );
     }
 
-    // Spouse marker
-    if (_spouseLocation != null) {
+    // Spouse marker — lerp animated, presence-aware
+    if (spouseRenderPos != null) {
       markers.add(
         Marker(
-          point: _spouseLocation!,
-          width: 58,
-          height: 58,
-          child: PulseGlow(
-            glowColor: RodMaeColors.rose,
-            child: _buildUserMarker(
-              PartnerIdentity.active.value == PartnerProfile.rodel
-                  ? PartnerProfile.maryMae.label
-                  : PartnerProfile.rodel.label,
-              false,
-            ),
+          point: spouseRenderPos,
+          width: 92,
+          height: 116,
+          alignment: Alignment.topCenter,
+          child: PersonGameMarker(
+            name: spouseName,
+            markerColor: RodMaeColors.rose,
+            presence:
+                _isSpouseOnline ? PresenceStatus.online : PresenceStatus.offline,
+            avatarUrl: _spouseAvatarUrl,
+            initials: spouseName.substring(0, 1),
+            lastSeenLabel:
+                _spouseLastSeen != null ? _timeAgo(_spouseLastSeen!) : null,
           ),
         ),
       );
@@ -711,6 +919,12 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
             ],
           ),
 
+          // Presence HUD chip (bottom-left, above the zoom controls)
+          Positioned(
+            bottom: 200,
+            left: 16,
+            child: _buildPresenceHud(isDark),
+          ),
 
           // 2. Floating Search Bar & Results
           Positioned(
@@ -1406,44 +1620,96 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     );
   }
 
-  // user profile picture marker with 3D styling
-  Widget _buildUserMarker(String name, bool isMe) {
-    final initials = name.substring(0, 1).toUpperCase();
-    final markerColor = isMe ? RodMaeColors.electricBlue : RodMaeColors.rose;
-    final avatarUrl = isMe ? _myAvatarUrl : _spouseAvatarUrl;
+  // Kept for backward compatibility; now delegates to PersonGameMarker
+  Widget _buildUserMarker(
+    String name,
+    bool isMe, {
+    PresenceStatus presence = PresenceStatus.online,
+    String? lastSeenLabel,
+  }) {
+    return PersonGameMarker(
+      name: name,
+      markerColor: isMe ? RodMaeColors.electricBlue : RodMaeColors.rose,
+      presence: presence,
+      avatarUrl: isMe ? _myAvatarUrl : _spouseAvatarUrl,
+      initials: name.substring(0, 1),
+      lastSeenLabel: lastSeenLabel,
+      isMe: isMe,
+    );
+  }
 
-    return Transform(
-      transform: Matrix4.identity()
-        ..setEntry(3, 2, 0.001) // perspective
-        ..rotateX(0.12) // subtle 3D tilt forward
-        ..rotateY(0.08),
-      alignment: Alignment.center,
-      child: Container(
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          border: Border.all(color: Colors.white, width: 2.2),
-          boxShadow: [
-            BoxShadow(
-              color: markerColor.withValues(alpha: 0.45),
-              blurRadius: 15,
-              spreadRadius: 2.5,
+  // ── Presence HUD (floating chip shown when spouse is detected offline) ────
+  Widget _buildPresenceHud(bool isDark) {
+    if (_spouseTargetLoc == null) return const SizedBox.shrink();
+    final spouseName =
+        PartnerIdentity.active.value == PartnerProfile.rodel
+            ? PartnerProfile.maryMae.label
+            : PartnerProfile.rodel.label;
+    final presenceColor =
+        _isSpouseOnline ? const Color(0xFF4ADE80) : const Color(0xFF6B7280);
+    final label = _isSpouseOnline
+        ? 'Online'
+        : (_spouseLastSeen != null ? _timeAgo(_spouseLastSeen!) : 'Offline');
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(22),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+          decoration: BoxDecoration(
+            color: (isDark ? Colors.black : Colors.white)
+                .withValues(alpha: 0.72),
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(
+              color: presenceColor.withValues(alpha: 0.35),
+              width: 1,
             ),
-          ],
-        ),
-        child: CircleAvatar(
-          radius: 20,
-          backgroundColor: markerColor,
-          backgroundImage: avatarUrl != null ? NetworkImage(avatarUrl) : null,
-          child: avatarUrl == null
-              ? Text(
-                  initials,
-                  style: GoogleFonts.inter(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w900,
-                    fontSize: 14,
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Animated presence dot
+              Container(
+                width: 9,
+                height: 9,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: presenceColor,
+                  boxShadow: [
+                    BoxShadow(
+                      color: presenceColor.withValues(alpha: 0.60),
+                      blurRadius: 5,
+                      spreadRadius: 1,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 7),
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    spouseName,
+                    style: GoogleFonts.inter(
+                      color: isDark ? Colors.white : const Color(0xFF1E3A8A),
+                      fontSize: 10,
+                      fontWeight: FontWeight.w900,
+                    ),
                   ),
-                )
-              : null,
+                  Text(
+                    label,
+                    style: GoogleFonts.inter(
+                      color: presenceColor,
+                      fontSize: 8.5,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1561,4 +1827,3 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     );
   }
 }
-

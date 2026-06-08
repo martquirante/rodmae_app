@@ -18,6 +18,7 @@ import 'models/couple_location.dart';
 import 'package:geolocator/geolocator.dart';
 import 'widgets/common_widgets.dart';
 import 'widgets/love_overlay.dart';
+import 'widgets/cinematic_envelope.dart';
 
 // Navigation & Screens
 import 'screens/splash_screen.dart';
@@ -133,7 +134,7 @@ class _MainNavigationShellState extends State<MainNavigationShell>
   StreamSubscription? _notesSub;
   StreamSubscription? _locationsSub;
 
-  String? _lastProcessedSignalId;
+  final Set<String> _processedSignalIds = {};
   late final DateTime _appStartTime;
 
   // Stream state indicators to prevent startup spam
@@ -144,22 +145,26 @@ class _MainNavigationShellState extends State<MainNavigationShell>
   String? _lastSpouseStatus;
   StreamSubscription<Position>? _backgroundPositionSub;
 
+  // ── Realtime broadcast channel for sub-100ms love-signal delivery ─────────
+  RealtimeChannel? _signalBroadcastChannel;
+  bool _envelopeVisible = false;
+
   static const _loveTriggersMap = <String, LoveTrigger>{
     'Miss You': LoveTrigger(
       title: 'Miss You',
-      subtitle: 'Hearts Shower',
-      icon: Icons.favorite_rounded,
-      color: RodMaeColors.rose,
+      subtitle: 'Bioluminescent Orbs',
+      icon: Icons.blur_circular_rounded,
+      color: RodMaeColors.violet,
       animationAsset: 'assets/animations/hearts.json',
-      overlayTitle: 'Spouse is thinking of you! ❤️',
+      overlayTitle: 'Spouse is thinking of you',
     ),
     'I Love You': LoveTrigger(
       title: 'I Love You',
-      subtitle: 'Hearts Shower',
+      subtitle: 'Ruby Glass Hearts',
       icon: Icons.favorite_rounded,
       color: RodMaeColors.rose,
       animationAsset: 'assets/animations/hearts.json',
-      overlayTitle: 'Spouse says I Love You! ❤️',
+      overlayTitle: 'Spouse says I Love You',
     ),
     'Heading Home': LoveTrigger(
       title: 'Heading Home',
@@ -171,11 +176,19 @@ class _MainNavigationShellState extends State<MainNavigationShell>
     ),
     'Flying Kiss': LoveTrigger(
       title: 'Flying Kiss',
-      subtitle: 'Heartbeat',
-      icon: Icons.favorite_border_rounded,
-      color: RodMaeColors.gold,
+      subtitle: 'Neon Sonic Rings',
+      icon: Icons.radio_button_checked_rounded,
+      color: RodMaeColors.rose,
       animationAsset: 'assets/animations/kiss.json',
-      overlayTitle: 'Spouse blew a flying kiss! 😘',
+      overlayTitle: 'Spouse blew a flying kiss',
+    ),
+    'Warm Embrace': LoveTrigger(
+      title: 'Warm Embrace',
+      subtitle: 'Golden Stardust Aurora',
+      icon: Icons.auto_awesome_rounded,
+      color: RodMaeColors.gold,
+      animationAsset: 'assets/animations/note.json',
+      overlayTitle: 'Spouse sent a warm embrace',
     ),
     'Surprise Note': LoveTrigger(
       title: 'Surprise Note',
@@ -190,7 +203,7 @@ class _MainNavigationShellState extends State<MainNavigationShell>
   @override
   void initState() {
     super.initState();
-    _appStartTime = DateTime.now();
+    _appStartTime = DateTime.now().toUtc();
     _lottieController = AnimationController(vsync: this);
     _lottieController.addStatusListener((status) {
       if (status == AnimationStatus.completed && mounted) {
@@ -202,11 +215,18 @@ class _MainNavigationShellState extends State<MainNavigationShell>
     AppNotificationNavigation.mainTabNotifier.value = _index;
     AppNotificationNavigation.mainTabNotifier.addListener(_onMainTabNotifierChanged);
 
+    // Dual-track: also fire overlay when FCM foreground message arrives.
+    NotificationService.loveSignalNotifier.addListener(_onFcmLoveSignal);
+
+    // Dual-track for surprise notes: FCM path
+    NotificationService.surpriseNoteNotifier.addListener(_onFcmSurpriseNote);
+
     _listenToSpouseSignals();
     _listenToChat();
     _listenToNotes();
     _listenToLocations();
     _startBackgroundLocationTracking();
+    _subscribeSignalBroadcast();
     WidgetsBinding.instance.addObserver(this);
   }
 
@@ -218,24 +238,109 @@ class _MainNavigationShellState extends State<MainNavigationShell>
     }
   }
 
+  /// Called when an FCM foreground message arrives with type='signal'.
+  void _onFcmLoveSignal() {
+    final payload = NotificationService.loveSignalNotifier.value;
+    if (payload == null || !mounted) return;
+
+    final currentPartner = PartnerIdentity.active.value.label.toLowerCase();
+    if (payload.senderName.toLowerCase() == currentPartner) return;
+
+    final trigger = _loveTriggersMap[payload.triggerType];
+    if (trigger == null) return;
+
+    HapticFeedback.heavyImpact();
+    setState(() => _activeGlobalTrigger = trigger);
+    _lottieController
+      ..reset()
+      ..forward();
+  }
+
+  /// Called when an FCM foreground message arrives with type='note'.
+  void _onFcmSurpriseNote() {
+    final payload = NotificationService.surpriseNoteNotifier.value;
+    if (payload == null || !mounted) return;
+
+    final currentPartner = PartnerIdentity.active.value.label.toLowerCase();
+    if (payload.senderName.toLowerCase() == currentPartner) return;
+
+    // Show the envelope overlay only if it's not already visible
+    if (!_envelopeVisible) {
+      _envelopeVisible = true;
+      showSurpriseNoteReceiveAnimation(
+        context,
+        content: payload.content,
+        senderName: payload.senderName,
+      ).then((_) {
+        _envelopeVisible = false;
+      });
+    }
+  }
+
+  // ── Realtime Broadcast channel for love signals (sub-100ms) ─────────────
+
+  void _subscribeSignalBroadcast() {
+    if (!AppRuntime.supabaseReady) return;
+    try {
+      _signalBroadcastChannel =
+          Supabase.instance.client.channel('signals:${AppConfig.coupleId}');
+      _signalBroadcastChannel!
+          .onBroadcast(
+            event: 'love_signal',
+            callback: (payload) {
+              if (!mounted) return;
+              final sender = payload['sender']?.toString() ?? '';
+              final me = PartnerIdentity.active.value.label;
+              if (sender.toLowerCase() == me.toLowerCase()) return;
+
+              final triggerType = payload['trigger_type']?.toString() ?? '';
+              final trigger = _loveTriggersMap[triggerType];
+              if (trigger == null) return;
+
+              // Deduplicate: use the broadcast ID or timestamp
+              final broadcastId =
+                  payload['id']?.toString() ?? payload['ts']?.toString() ?? '';
+              if (broadcastId.isNotEmpty &&
+                  _processedSignalIds.contains('bc_$broadcastId')) return;
+              if (broadcastId.isNotEmpty) {
+                _processedSignalIds.add('bc_$broadcastId');
+              }
+
+              HapticFeedback.heavyImpact();
+              setState(() => _activeGlobalTrigger = trigger);
+              _lottieController
+                ..reset()
+                ..forward();
+            },
+          )
+          .subscribe();
+    } catch (_) {}
+  }
+
   void _listenToSpouseSignals() {
     _signalsSub = SupabaseWeddingRepository.instance.watchLoveTriggers().listen((events) {
       if (!mounted || events.isEmpty) return;
-      
-      final latest = events.first;
+
       final currentPartner = PartnerIdentity.active.value.label.toLowerCase();
-      final isSpouse = latest.sender.toLowerCase() != currentPartner;
+      // Use UTC for both sides to avoid any local-vs-UTC comparison bugs.
+      // Allow signals from up to 90 seconds before this session started (grace window).
+      final cutoff = _appStartTime.subtract(const Duration(seconds: 90));
+      final sortedEvents = [...events]
+        ..sort((a, b) => b.createdAt.toUtc().compareTo(a.createdAt.toUtc()));
 
-      // Show notification only for signals that are recent (sent within 60s of app start
-      // or sent after app start) and not already processed
-      final isRecent = latest.createdAt.isAfter(_appStartTime.subtract(const Duration(seconds: 60)));
+      for (final latest in sortedEvents) {
+        final isSpouse = latest.sender.toLowerCase() != currentPartner;
+        // createdAt from Supabase is UTC — compare to UTC cutoff.
+        final isRecent = latest.createdAt.toUtc().isAfter(cutoff);
+        final isFresh = !_processedSignalIds.contains(latest.id);
+        if (!isSpouse || !isRecent || !isFresh) {
+          continue;
+        }
 
-      if (isSpouse && isRecent && latest.id != _lastProcessedSignalId) {
-        
-        _lastProcessedSignalId = latest.id;
+        _processedSignalIds.add(latest.id);
         final trigger = _loveTriggersMap[latest.triggerType];
         if (trigger != null) {
-          HapticFeedback.vibrate();
+          HapticFeedback.heavyImpact();
           setState(() => _activeGlobalTrigger = trigger);
           _lottieController
             ..reset()
@@ -248,16 +353,11 @@ class _MainNavigationShellState extends State<MainNavigationShell>
             color: trigger.color,
             onTap: () {
               AppNotificationNavigation.mainTabNotifier.value = 1;
-              AppNotificationNavigation.privateChatTabNotifier.value = 2; // Signals tab
+              AppNotificationNavigation.privateChatTabNotifier.value = 2;
             },
           );
-          // ── FCM push notification (received on device even when app is closed)
-          NotificationService.sendPushToSpouse(
-            title: '${latest.sender} sent love signal! 💕',
-            body: trigger.subtitle,
-            type: 'signal',
-          );
         }
+        break;
       }
     });
   }
@@ -320,8 +420,22 @@ class _MainNavigationShellState extends State<MainNavigationShell>
           final isSpouse = note.sender.toLowerCase() != currentPartner;
 
           if (isSpouse) {
-            final onNotesTab = AppNotificationNavigation.mainTabNotifier.value == 1 &&
-                               AppNotificationNavigation.privateChatTabNotifier.value == 1;
+            // ── PRIMARY: show cinematic envelope overlay ─────────────────────
+            if (!_envelopeVisible) {
+              _envelopeVisible = true;
+              showSurpriseNoteReceiveAnimation(
+                context,
+                content: note.content,
+                senderName: note.sender,
+              ).then((_) {
+                _envelopeVisible = false;
+              });
+            }
+
+            // ── SECONDARY: also show a banner for quick re-access ────────────
+            final onNotesTab =
+                AppNotificationNavigation.mainTabNotifier.value == 1 &&
+                AppNotificationNavigation.privateChatTabNotifier.value == 1;
             if (!onNotesTab) {
               AppNotificationNavigation.show(
                 title: 'Sweet note from ${note.sender} 🌸',
@@ -330,7 +444,7 @@ class _MainNavigationShellState extends State<MainNavigationShell>
                 color: RodMaeColors.gold,
                 onTap: () {
                   AppNotificationNavigation.mainTabNotifier.value = 1;
-                  AppNotificationNavigation.privateChatTabNotifier.value = 1; // Sweet Notes tab
+                  AppNotificationNavigation.privateChatTabNotifier.value = 1;
                 },
               );
             }
@@ -437,6 +551,8 @@ class _MainNavigationShellState extends State<MainNavigationShell>
   @override
   void dispose() {
     AppNotificationNavigation.mainTabNotifier.removeListener(_onMainTabNotifierChanged);
+    NotificationService.loveSignalNotifier.removeListener(_onFcmLoveSignal);
+    NotificationService.surpriseNoteNotifier.removeListener(_onFcmSurpriseNote);
     WidgetsBinding.instance.removeObserver(this);
     _signalsSub?.cancel();
     _chatSub?.cancel();
@@ -444,6 +560,9 @@ class _MainNavigationShellState extends State<MainNavigationShell>
     _locationsSub?.cancel();
     _backgroundPositionSub?.cancel();
     _lottieController.dispose();
+    try {
+      _signalBroadcastChannel?.unsubscribe();
+    } catch (_) {}
     super.dispose();
   }
 
@@ -547,4 +666,3 @@ final class AppBootstrapper {
     );
   }
 }
-

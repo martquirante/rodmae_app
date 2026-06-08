@@ -18,6 +18,7 @@ import '../widgets/glass_card.dart';
 import '../widgets/primary_button.dart';
 import '../widgets/common_widgets.dart';
 import '../widgets/love_overlay.dart';
+import '../widgets/cinematic_envelope.dart';
 
 class PrivateChatScreen extends StatefulWidget {
   const PrivateChatScreen({super.key});
@@ -38,14 +39,7 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
   LoveTrigger? _activeTrigger;
   late final AnimationController _lottieController;
 
-  static const _noteTrigger = LoveTrigger(
-    title: 'Surprise Note',
-    subtitle: 'Push Note',
-    icon: Icons.sticky_note_2_rounded,
-    color: RodMaeColors.electricBlue,
-    animationAsset: 'assets/animations/note.json',
-    overlayTitle: 'Surprise note queued',
-  );
+
 
   @override
   void initState() {
@@ -79,13 +73,7 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
     super.dispose();
   }
 
-  void _triggerNoteAnimation() {
-    HapticFeedback.mediumImpact();
-    setState(() => _activeTrigger = _noteTrigger);
-    _lottieController
-      ..reset()
-      ..forward();
-  }
+
 
   Future<void> _sendMessage() async {
     final text = _chatController.text.trim();
@@ -127,16 +115,15 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
     setState(() => _sendingNote = true);
     _noteController.clear();
 
+    final messenger = ScaffoldMessenger.of(context);
     try {
+      showSurpriseNoteSendAnimation(context);
       await SupabaseWeddingRepository.instance.insertSurpriseNote(text);
-      // Save trigger event
-      await SupabaseWeddingRepository.instance.insertLoveTrigger('Surprise Note');
-      _triggerNoteAnimation();
-      ScaffoldMessenger.of(context).showSnackBar(
+      messenger.showSnackBar(
         const SnackBar(content: Text('Sweet note sent to your spouse!')),
       );
     } catch (error) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      messenger.showSnackBar(
         const SnackBar(content: Text('Failed to sync note, saved locally.')),
       );
     } finally {

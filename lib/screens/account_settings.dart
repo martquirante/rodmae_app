@@ -152,7 +152,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
             _profile = _profile?.copyWith(avatarUrl: url) ??
                 UserProfile(
                   id: '',
-                  coupleId: 'couple-rodmae-2026',
+                  coupleId: 'couple-rodel-marymae-2026',
                   partner: partner,
                   avatarUrl: url,
                   updatedAt: DateTime.now(),

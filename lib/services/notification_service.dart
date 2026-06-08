@@ -1,197 +1,363 @@
 import 'dart:async';
 import 'dart:convert';
+
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
 import '../core/constants.dart';
 import '../core/theme.dart';
 import 'auth_service.dart';
+import 'firebase_service.dart';
 
-// ─── Top-level background message handler (required to be top-level) ──────────
 @pragma('vm:entry-point')
 Future<void> _firebaseBackgroundMessageHandler(RemoteMessage message) async {
-  // flutter_local_notifications will handle showing the notification
-  // for data-only messages that arrive in the background.
-  await NotificationService.instance._showLocalNotification(message);
+  await NotificationService.instance.showLocalNotification(message);
 }
 
-// ─── Notification Channel IDs ──────────────────────────────────────────────────
-const _kChannelId   = 'rodmae_love_channel';
+const _kChannelId = 'rodmae_love_channel';
 const _kChannelName = 'RodMae Love Alerts';
-const _kChannelDesc = 'Real-time love signals, chats, and notes from your partner';
+const _kChannelDesc =
+    'Real-time love signals, chats, and notes from your partner';
 
-/// Centralised service that:
-/// 1. Initialises FlutterLocalNotifications with a high-priority channel.
-/// 2. Registers FCM and requests permission on first launch.
-/// 3. Shows a local notification for every FCM message (foreground + background).
-/// 4. Wires navigation when the user taps a notification.
+/// Fired when an incoming FCM message carries a love signal.
+final class LoveSignalPayload {
+  final String triggerType;
+  final String senderName;
+
+  const LoveSignalPayload({
+    required this.triggerType,
+    required this.senderName,
+  });
+}
+
+/// Fired when an incoming FCM message carries a surprise note.
+final class SurpriseNotePayload {
+  final String content;
+  final String senderName;
+
+  const SurpriseNotePayload({
+    required this.content,
+    required this.senderName,
+  });
+}
+
+
 final class NotificationService {
   NotificationService._();
+
   static final NotificationService instance = NotificationService._();
 
-  final _flutterLocalNotifications = FlutterLocalNotificationsPlugin();
-  final _fcm = FirebaseMessaging.instance;
+  final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+      FlutterLocalNotificationsPlugin();
+  final FirebaseMessaging _fcm = FirebaseMessaging.instance;
 
-  /// Call once in main() before runApp.
+  /// Notifier for incoming love signals received via FCM foreground delivery.
+  static final loveSignalNotifier =
+      ValueNotifier<LoveSignalPayload?>(null);
+
+  /// Notifier for incoming surprise notes received via FCM foreground delivery.
+  /// Subscribe in MainNavigationShell to show the cinematic envelope overlay.
+  static final surpriseNoteNotifier =
+      ValueNotifier<SurpriseNotePayload?>(null);
+
+
+  bool _localNotificationsReady = false;
+  StreamSubscription<RemoteMessage>? _foregroundSub;
+  StreamSubscription<RemoteMessage>? _openedSub;
+
   Future<void> initialize() async {
-    try {
-      // ── 1. Android notification channel ────────────────────────────────────────
-      const androidChannel = AndroidNotificationChannel(
-        _kChannelId,
-        _kChannelName,
-        description: _kChannelDesc,
-        importance: Importance.max,
-        playSound: true,
-        enableVibration: true,
-        enableLights: true,
-        ledColor: Color(0xFF3B82F6), // RodMaeColors.electricBlue
-      );
-
-      final androidPlugin = _flutterLocalNotifications
-          .resolvePlatformSpecificImplementation<
-              AndroidFlutterLocalNotificationsPlugin>();
-      await androidPlugin?.createNotificationChannel(androidChannel);
-
-      // ── 2. Initialise flutter_local_notifications ───────────────────────────────
-      const initSettingsAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
-      const initSettings = InitializationSettings(android: initSettingsAndroid);
-
-      await _flutterLocalNotifications.initialize(
-        initSettings,
-        onDidReceiveNotificationResponse: (response) {
-          // Tapped on a notification → navigate based on payload
-          _handleNotificationTap(response.payload);
-        },
-      );
-    } catch (e) {
-      debugPrint('NotificationService: Local notifications init failed: $e');
-    }
-
-    // Run Firebase/FCM calls in a separate asynchronous task to avoid stalling the main boot process.
-    // This is crucial on devices without fully working Google Play Services (e.g., Poco/Xiaomi Chinese ROMs, sandbox)
-    unawaited(Future(() async {
-      try {
-        // ── 3. Request FCM permission ───────────────────────────────────────────────
-        await _fcm.requestPermission(
-          alert: true,
-          badge: true,
-          sound: true,
-          provisional: false,
-        ).timeout(const Duration(seconds: 3));
-
-        // ── 4. Background handler (must be top-level function) ────────────────────
-        FirebaseMessaging.onBackgroundMessage(_firebaseBackgroundMessageHandler);
-
-        // ── 5. Foreground messages → show local notification + in-app banner ───────
-        FirebaseMessaging.onMessage.listen((message) {
-          _showLocalNotification(message);
-          // Also trigger the in-app 3D banner when the app is open
-          _triggerInAppBanner(message);
-        });
-
-        // ── 6. Notification tapped while app was in background ─────────────────────
-        FirebaseMessaging.onMessageOpenedApp.listen((message) {
-          _handleNotificationTap(
-            jsonEncode(message.data.isNotEmpty ? message.data : {'type': 'general'}),
-          );
-        });
-
-        // ── 7. Check if app was launched from a terminated notification ─────────────
-        final initialMessage = await _fcm.getInitialMessage().timeout(const Duration(seconds: 3));
-        if (initialMessage != null) {
-          // Small delay to allow the widget tree to mount first
-          await Future.delayed(const Duration(milliseconds: 800));
-          _handleNotificationTap(
-            jsonEncode(initialMessage.data.isNotEmpty ? initialMessage.data : {'type': 'general'}),
-          );
-        }
-
-        // ── 8. Subscribe to topic for couple-wide broadcasts ───────────────────────
-        await _fcm.subscribeToTopic('couple-rodmae-2026').timeout(const Duration(seconds: 4));
-      } catch (e) {
-        debugPrint('NotificationService: FCM background registration encountered error: $e');
-      }
-    }));
+    await _initializeLocalNotifications();
+    unawaited(_initializeFirebaseMessaging());
   }
 
-  /// Displays a native system notification from a RemoteMessage.
-  Future<void> _showLocalNotification(RemoteMessage message) async {
+  Future<void> _initializeLocalNotifications() async {
+    if (_localNotificationsReady) {
+      return;
+    }
+
+    const androidChannel = AndroidNotificationChannel(
+      _kChannelId,
+      _kChannelName,
+      description: _kChannelDesc,
+      importance: Importance.max,
+      playSound: true,
+      enableVibration: true,
+      enableLights: true,
+      ledColor: Color(0xFF3B82F6),
+    );
+
+    final androidPlugin =
+        flutterLocalNotificationsPlugin.resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>();
+    await androidPlugin?.createNotificationChannel(androidChannel);
+    await androidPlugin?.requestNotificationsPermission();
+
+    const initSettings = InitializationSettings(
+      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+      iOS: DarwinInitializationSettings(
+        requestAlertPermission: true,
+        requestBadgePermission: true,
+        requestSoundPermission: true,
+      ),
+    );
+
+    await flutterLocalNotificationsPlugin.initialize(
+      initSettings,
+      onDidReceiveNotificationResponse: (response) {
+        _handleNotificationTap(response.payload);
+      },
+    );
+
+    _localNotificationsReady = true;
+  }
+
+  Future<void> _initializeFirebaseMessaging() async {
     try {
+      await _fcm
+          .requestPermission(
+            alert: true,
+            badge: true,
+            sound: true,
+            provisional: false,
+          )
+          .timeout(const Duration(seconds: 5));
+
+      // iOS: explicitly request foreground presentation of FCM notifications.
+      await FirebaseMessaging.instance
+          .setForegroundNotificationPresentationOptions(
+        alert: true,
+        badge: true,
+        sound: true,
+      );
+
+      FirebaseMessaging.onBackgroundMessage(_firebaseBackgroundMessageHandler);
+
+      await _foregroundSub?.cancel();
+      _foregroundSub = FirebaseMessaging.onMessage.listen((message) async {
+        final sender = message.data['sender']?.toString();
+        if (_isFromActivePartner(sender)) {
+          debugPrint(
+            'NotificationService: foreground self-notification suppressed for $sender',
+          );
+          return;
+        }
+
+        final notification = message.notification;
+        final title = notification?.title?.trim().isNotEmpty == true
+            ? notification!.title!
+            : (message.data['title']?.toString() ?? 'RodMae Love Alert');
+        final body = notification?.body?.trim().isNotEmpty == true
+            ? notification!.body!
+            : (message.data['body']?.toString() ?? 'New private update');
+        final type = message.data['type']?.toString() ?? 'general';
+        final color = _colorForType(type);
+
+        // ── ANDROID FOREGROUND: force system-tray notification ──────────────
+        // On Android, FCM suppresses heads-up notifications when the app is in
+        // the foreground unless we explicitly call show() via the local plugin.
+        final details = NotificationDetails(
+          android: AndroidNotificationDetails(
+            _kChannelId,
+            _kChannelName,
+            channelDescription: _kChannelDesc,
+            importance: Importance.max,
+            priority: Priority.high,
+            color: color,
+            icon: '@mipmap/ic_launcher',
+            largeIcon:
+                const DrawableResourceAndroidBitmap('@mipmap/ic_launcher'),
+            styleInformation: BigTextStyleInformation(body),
+            category: AndroidNotificationCategory.message,
+            visibility: NotificationVisibility.public,
+            enableVibration: true,
+            playSound: true,
+            ticker: title,
+          ),
+          iOS: const DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: true,
+          ),
+        );
+
+        await flutterLocalNotificationsPlugin.show(
+          _notificationId(message),
+          title,
+          body,
+          details,
+          payload: jsonEncode(message.data),
+        );
+
+        // ── DUAL-TRACK: fire love overlay via FCM foreground message ─────────
+        // This guarantees that even if Supabase Realtime is delayed, the
+        // receiving partner sees the cinematic overlay immediately.
+        if (type == 'signal') {
+          final triggerType = message.data['trigger_type']?.toString() ??
+              message.data['body']?.toString() ??
+              body;
+          final senderName = sender ?? 'Your partner';
+          _fireLoveSignalOverlay(triggerType: triggerType, senderName: senderName);
+        }
+
+        // ── DUAL-TRACK: fire envelope overlay for surprise notes ─────────────
+        if (type == 'note') {
+          final noteContent = message.data['content']?.toString() ?? body;
+          final senderName = sender ?? 'Your partner';
+          _fireSurpriseNoteOverlay(content: noteContent, senderName: senderName);
+        }
+
+        _triggerInAppBanner(
+          title: title,
+          body: body,
+          type: type,
+          payload: message.data,
+        );
+      });
+
+      await _openedSub?.cancel();
+      _openedSub = FirebaseMessaging.onMessageOpenedApp.listen((message) {
+        _handleNotificationTap(
+          jsonEncode(message.data.isNotEmpty ? message.data : {'type': 'general'}),
+        );
+      });
+
+      final initialMessage =
+          await _fcm.getInitialMessage().timeout(const Duration(seconds: 4));
+      if (initialMessage != null) {
+        await Future<void>.delayed(const Duration(milliseconds: 650));
+        _handleNotificationTap(
+          jsonEncode(
+            initialMessage.data.isNotEmpty
+                ? initialMessage.data
+                : {'type': 'general'},
+          ),
+        );
+      }
+
+      await _fcm
+          .subscribeToTopic(AppConfig.coupleId)
+          .timeout(const Duration(seconds: 5));
+
+      debugPrint(
+        'NotificationService: subscribed to FCM topic "${AppConfig.coupleId}"',
+      );
+    } catch (error) {
+      debugPrint('NotificationService: FCM registration failed: $error');
+    }
+  }
+
+  Future<void> showLocalNotification(RemoteMessage message) async {
+    try {
+      await _initializeLocalNotifications();
+
       final sender = message.data['sender']?.toString();
-      final currentPartner = PartnerIdentity.active.value.label.toLowerCase();
-      if (sender != null && sender.toLowerCase() == currentPartner) {
-        debugPrint('NotificationService: Suppressing self-notification for $sender');
+      if (_isFromActivePartner(sender)) {
+        debugPrint(
+          'NotificationService: local self-notification suppressed for $sender',
+        );
         return;
       }
 
       final notification = message.notification;
-      final title = notification?.title ?? message.data['title'] ?? 'RodMae 💕';
-      final body  = notification?.body  ?? message.data['body']  ?? '';
-      final type  = message.data['type'] ?? 'general';
+      final title = notification?.title?.trim().isNotEmpty == true
+          ? notification!.title!
+          : (message.data['title']?.toString() ?? 'RodMae Love Alert');
+      final body = notification?.body?.trim().isNotEmpty == true
+          ? notification!.body!
+          : (message.data['body']?.toString() ?? 'New private update');
+      final type = message.data['type']?.toString() ?? 'general';
 
-      // Pick accent color based on notification type
-      final color = _colorForType(type);
-
-      final androidDetails = AndroidNotificationDetails(
-        _kChannelId,
-        _kChannelName,
-        channelDescription: _kChannelDesc,
-        importance: Importance.max,
-        priority: Priority.max,
-        color: color,
-        icon: '@mipmap/ic_launcher',
-        largeIcon: const DrawableResourceAndroidBitmap('@mipmap/ic_launcher'),
-        styleInformation: BigTextStyleInformation(body),
-        enableVibration: true,
-        playSound: true,
-        ticker: title,
-      );
-
-      final details = NotificationDetails(android: androidDetails);
-      final id = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-
-      await _flutterLocalNotifications.show(
-        id,
+      await flutterLocalNotificationsPlugin.show(
+        _notificationId(message),
         title,
         body,
-        details,
+        NotificationDetails(
+          android: AndroidNotificationDetails(
+            _kChannelId,
+            _kChannelName,
+            channelDescription: _kChannelDesc,
+            importance: Importance.max,
+            priority: Priority.high,
+            color: _colorForType(type),
+            icon: '@mipmap/ic_launcher',
+            largeIcon:
+                const DrawableResourceAndroidBitmap('@mipmap/ic_launcher'),
+            styleInformation: BigTextStyleInformation(body),
+            category: AndroidNotificationCategory.message,
+            visibility: NotificationVisibility.public,
+            enableVibration: true,
+            playSound: true,
+          ),
+          iOS: const DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: true,
+          ),
+        ),
         payload: jsonEncode(message.data),
       );
-    } catch (e) {
-      debugPrint('NotificationService: Failed to display local notification: $e');
+    } catch (error) {
+      debugPrint('NotificationService: local notification failed: $error');
     }
   }
 
-  /// Triggers the in-app 3D banner from AppNotificationNavigation
-  void _triggerInAppBanner(RemoteMessage message) {
-    final sender = message.data['sender']?.toString();
-    final currentPartner = PartnerIdentity.active.value.label.toLowerCase();
-    if (sender != null && sender.toLowerCase() == currentPartner) {
-      debugPrint('NotificationService: Suppressing self-banner for $sender');
-      return;
+  void _fireLoveSignalOverlay({
+    required String triggerType,
+    required String senderName,
+  }) {
+    final payload = LoveSignalPayload(
+      triggerType: triggerType,
+      senderName: senderName,
+    );
+    if (loveSignalNotifier.value != null) {
+      loveSignalNotifier.value = null;
     }
+    Future.delayed(Duration.zero, () {
+      loveSignalNotifier.value = payload;
+    });
+  }
 
-    final type  = message.data['type'] ?? 'general';
-    final title = message.notification?.title ?? message.data['title'] ?? 'RodMae 💕';
-    final body  = message.notification?.body  ?? message.data['body']  ?? '';
+  void _fireSurpriseNoteOverlay({
+    required String content,
+    required String senderName,
+  }) {
+    final payload = SurpriseNotePayload(
+      content: content,
+      senderName: senderName,
+    );
+    if (surpriseNoteNotifier.value != null) {
+      surpriseNoteNotifier.value = null;
+    }
+    Future.delayed(Duration.zero, () {
+      surpriseNoteNotifier.value = payload;
+    });
+  }
 
+  void _triggerInAppBanner({
+    required String title,
+    required String body,
+    required String type,
+    required Map<String, dynamic> payload,
+  }) {
     final (icon, color) = _iconAndColorForType(type);
-
     AppNotificationNavigation.show(
       title: title,
       message: body,
       icon: icon,
       color: color,
-      onTap: () => _handleNotificationTap(jsonEncode(message.data)),
+      onTap: () => _handleNotificationTap(jsonEncode(payload)),
     );
   }
 
-  /// Handles deep-link navigation when a notification is tapped.
   void _handleNotificationTap(String? payload) {
-    if (payload == null) return;
+    if (payload == null || payload.isEmpty) {
+      return;
+    }
     try {
       final data = jsonDecode(payload) as Map<String, dynamic>;
-      final type = data['type'] ?? 'general';
+      final type = data['type']?.toString() ?? 'general';
 
       switch (type) {
         case 'chat':
@@ -208,10 +374,85 @@ final class NotificationService {
         default:
           AppNotificationNavigation.mainTabNotifier.value = 0;
       }
-    } catch (_) {}
+    } catch (error) {
+      debugPrint('NotificationService: invalid notification payload: $error');
+    }
   }
 
-  /// Returns the accent color for a given notification type.
+  static Future<void> sendPushToSpouse({
+    required String title,
+    required String body,
+    required String type,
+    String? sender,
+    String? triggerType,
+    String topic = AppConfig.coupleId,
+  }) async {
+    if (!AppRuntime.supabaseReady) {
+      return;
+    }
+
+    final activeSender = sender ?? PartnerIdentity.active.value.label;
+    final record = <String, dynamic>{
+      'couple_id': AppConfig.coupleId,
+      'sender': activeSender,
+      'created_at': DateTime.now().toUtc().toIso8601String(),
+      if (type == 'signal') 'trigger_type': triggerType ?? body,
+      if (type == 'chat') 'message': body,
+      if (type == 'note') 'content': body,
+      'topic': topic,
+    };
+
+    final table = switch (type) {
+      'chat' => 'chat_history',
+      'note' => 'surprise_notes',
+      'signal' => 'love_triggers',
+      _ => 'notifications',
+    };
+
+    try {
+      await Supabase.instance.client.functions.invoke(
+        'send_fcm_notification',
+        body: {
+          'type': 'INSERT',
+          'table': table,
+          'record': record,
+          'client_fallback': true,
+          'notification': {
+            'title': title,
+            'body': body,
+          },
+        },
+      ).timeout(const Duration(seconds: 7));
+    } catch (error) {
+      debugPrint('NotificationService: push dispatch fallback failed: $error');
+    }
+  }
+
+  Future<String?> getToken() async {
+    try {
+      return await _fcm.getToken().timeout(const Duration(seconds: 5));
+    } catch (error) {
+      debugPrint('NotificationService: token read failed: $error');
+      return null;
+    }
+  }
+
+  bool _isFromActivePartner(String? sender) {
+    if (sender == null || sender.trim().isEmpty) {
+      return false;
+    }
+    return sender.trim().toLowerCase() ==
+        PartnerIdentity.active.value.label.toLowerCase();
+  }
+
+  int _notificationId(RemoteMessage message) {
+    final hash = message.messageId?.hashCode;
+    if (hash != null) {
+      return hash & 0x7fffffff;
+    }
+    return DateTime.now().millisecondsSinceEpoch.remainder(2147483647);
+  }
+
   Color _colorForType(String type) {
     switch (type) {
       case 'chat':
@@ -227,7 +468,6 @@ final class NotificationService {
     }
   }
 
-  /// Returns the (icon, color) pair for in-app banner from a notification type.
   (IconData, Color) _iconAndColorForType(String type) {
     switch (type) {
       case 'chat':
@@ -240,40 +480,6 @@ final class NotificationService {
         return (Icons.location_on_rounded, RodMaeColors.mint);
       default:
         return (Icons.notifications_rounded, RodMaeColors.electricBlue);
-    }
-  }
-
-  /// Sends an FCM push notification to the couple topic via the FCM HTTP v1 API.
-  /// Call this whenever the current user sends a message, note, or love signal.
-  ///
-  /// [type] should be one of: 'chat', 'note', 'signal', 'location'
-  static Future<void> sendPushToSpouse({
-    required String title,
-    required String body,
-    required String type,
-    String topic = 'couple-rodmae-2026',
-  }) async {
-    // NOTE: For production, this HTTP call should go through a Supabase Edge
-    // Function or your own server to keep the FCM server key secret.
-    // For now we use the Firebase Admin SDK via a Supabase Edge Function trigger.
-    // The push is sent server-side via a Supabase Database Webhook → Edge Function.
-    // This method is a stub kept here for documentation purposes.
-    //
-    // The actual FCM push is triggered automatically by the Supabase Edge Function
-    // 'send_fcm_notification' which listens to INSERT events on:
-    //   - chat_history
-    //   - surprise_notes
-    //   - love_triggers
-    //
-    // See: supabase/functions/send_fcm_notification/index.ts
-  }
-
-  /// Get the current device's FCM token (useful for debugging).
-  Future<String?> getToken() async {
-    try {
-      return await _fcm.getToken().timeout(const Duration(seconds: 4));
-    } catch (_) {
-      return null;
     }
   }
 }

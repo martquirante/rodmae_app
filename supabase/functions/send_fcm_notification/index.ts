@@ -98,7 +98,7 @@ serve(async (req: Request) => {
     const fcmEndpoint = `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`;
     const fcmPayload = {
       message: {
-        topic: "couple-rodmae-2026",
+        topic: String(record["topic"] ?? "couple-rodel-marymae-2026"),
         notification: {
           title,
           body,
@@ -107,7 +107,12 @@ serve(async (req: Request) => {
           type,
           title,
           body,
-          sender, // Pass sender name to prevent self-notification loops
+          sender,            // Pass sender name to prevent self-notification loops
+          // For love signals, include the trigger_type so the Flutter receiver
+          // can directly look up and show the correct cinematic overlay.
+          trigger_type: table === "love_triggers"
+            ? String(record["trigger_type"] ?? body)
+            : "",
         },
         android: {
           priority: "HIGH",

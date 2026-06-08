@@ -726,6 +726,7 @@ final class SupabaseWeddingRepository {
       }
     } catch (e) {
       print('Supabase insertLoveTrigger error: $e');
+      rethrow;
     }
   }
 
@@ -984,5 +985,22 @@ final class SupabaseWeddingRepository {
 
     return controller.stream;
   }
-}
 
+  // ── Presence heartbeat ────────────────────────────────────────────────────
+  /// Touch `updated_at` on the live-location row so the partner can show
+  /// "last seen X seconds ago" even when the device hasn't moved.
+  Future<void> updatePresenceHeartbeat(String partner) async {
+    try {
+      if (!AppRuntime.supabaseReady) return;
+      await _client
+          .from('couple_locations')
+          .update({'updated_at': DateTime.now().toUtc().toIso8601String()})
+          .eq('couple_id', AppConfig.coupleId)
+          .eq('partner', partner)
+          .eq('location_type', 'live');
+    } catch (e) {
+      // ignore: avoid_print
+      print('Presence heartbeat error: $e');
+    }
+  }
+}
