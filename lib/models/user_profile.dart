@@ -1,7 +1,7 @@
 class UserProfile {
   final String id;
   final String coupleId;
-  final String partner;       // 'Rodel' or 'Mary Mae'
+  final String partner;       // 'Rodel' or 'Eurine'
   final String? displayName;
   final String? bio;
   final String? avatarUrl;    // Public Supabase Storage URL

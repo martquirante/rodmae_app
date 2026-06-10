@@ -14,6 +14,7 @@ import '../services/gemini_service.dart';
 import '../widgets/glass_card.dart';
 import '../widgets/primary_button.dart';
 import '../widgets/common_widgets.dart';
+import '../widgets/advanced_loading_effect.dart';
 
 class ManagementHubScreen extends StatefulWidget {
   const ManagementHubScreen({super.key});
@@ -218,10 +219,18 @@ class _FinanceManagementTabState extends State<FinanceManagementTab> {
             backgroundColor: RodMaeColors.gold,
             foregroundColor: RodMaeColors.navy,
             icon: _scanning
-                ? const SizedBox(
-                    width: 17,
-                    height: 17,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+                ? AdvancedLoadingEffect(
+                    isLoading: true,
+                    shape: BoxShape.circle,
+                    placeholder: Container(
+                      width: 17,
+                      height: 17,
+                      decoration: const BoxDecoration(
+                        color: Colors.white38,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    child: const SizedBox(width: 17, height: 17),
                   )
                 : const Icon(Icons.document_scanner_rounded),
             label: Text(
@@ -333,7 +342,6 @@ class _FinanceFront extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
     return GlassCard(
       gradient: RodMaeColors.sapphireGradient,
       borderColor: RodMaeColors.sky.withValues(alpha: 0.22),

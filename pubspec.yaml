@@ -1,5 +1,5 @@
 name: rodmae_app
-description: "RodMae App - private wedding companion app for Rodel and Mary Mae."
+description: "RodMae App - private wedding companion app for Rodel and Eurine."
 publish_to: "none"
 version: 1.0.0+1
 
@@ -24,12 +24,14 @@ dependencies:
   shared_preferences: ^2.5.5
   geolocator: ^14.0.2
   http: ^1.6.0
+  connectivity_plus: ^6.1.4
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
   flutter_launcher_icons: ^0.13.1
+  flutter_native_splash: ^2.4.4
 
 flutter_launcher_icons:
   android: true
@@ -50,3 +52,14 @@ flutter:
   assets:
     - assets/animations/
     - assets/images/
+    # Walking sprite frames (4-frame cycle per person)
+    - assets/maps_res/walking/rodel/
+    - assets/maps_res/walking/eurine/
+    # Vehicle rear-view images
+    - assets/maps_res/markers/biking/
+    - assets/maps_res/markers/motorcycle/
+    - assets/maps_res/markers/driving/
+    - assets/maps_res/markers/transit/
+    # Destination / place markers
+    - assets/maps_res/markers/home/
+    - assets/maps_res/markers/office/

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../core/theme.dart';
+import 'advanced_loading_effect.dart';
 
 class PrimaryPillButton extends StatelessWidget {
   final String label;
@@ -23,10 +24,18 @@ class PrimaryPillButton extends StatelessWidget {
     return FilledButton.icon(
       onPressed: busy ? null : onPressed,
       icon: busy
-          ? const SizedBox(
-              width: 15,
-              height: 15,
-              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+          ? AdvancedLoadingEffect(
+              isLoading: true,
+              shape: BoxShape.circle,
+              placeholder: Container(
+                width: 15,
+                height: 15,
+                decoration: const BoxDecoration(
+                  color: Colors.white60,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              child: const SizedBox(width: 15, height: 15),
             )
           : Icon(icon, size: 17),
       label: Text(label),

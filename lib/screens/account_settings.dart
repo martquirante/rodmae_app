@@ -15,6 +15,7 @@ import '../models/couple_settings.dart';
 import '../widgets/glass_card.dart';
 import '../widgets/animated_3d_card.dart';
 import '../widgets/particle_burst.dart';
+import '../widgets/advanced_loading_effect.dart';
 
 class AccountSettingsScreen extends StatefulWidget {
   const AccountSettingsScreen({super.key});
@@ -599,16 +600,17 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
                         ),
                         child: ClipOval(
                           child: _uploadingAvatar
-                              ? Stack(
-                                  alignment: Alignment.center,
-                                  children: [
-                                    CircularProgressIndicator(
-                                      value: _uploadProgress,
-                                      color: RodMaeColors.gold,
-                                      backgroundColor: RodMaeColors.navy,
-                                      strokeWidth: 3,
+                              ? AdvancedLoadingEffect(
+                                  isLoading: true,
+                                  shape: BoxShape.circle,
+                                  placeholder: Container(
+                                    decoration: const BoxDecoration(
+                                      color: Colors.white12,
+                                      shape: BoxShape.circle,
                                     ),
-                                    Text(
+                                  ),
+                                  child: Center(
+                                    child: Text(
                                       '${(_uploadProgress * 100).toInt()}%',
                                       style: GoogleFonts.inter(
                                         color: Colors.white,
@@ -616,7 +618,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
                                         fontWeight: FontWeight.w800,
                                       ),
                                     ),
-                                  ],
+                                  ),
                                 )
                               : avatarUrl != null
                                   ? Image.network(
@@ -625,11 +627,16 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
                                       loadingBuilder: (_, child, progress) =>
                                           progress == null
                                               ? child
-                                              : const Center(
-                                                  child: CircularProgressIndicator(
-                                                    color: RodMaeColors.gold,
-                                                    strokeWidth: 2,
+                                              : AdvancedLoadingEffect(
+                                                  isLoading: true,
+                                                  shape: BoxShape.circle,
+                                                  placeholder: Container(
+                                                    decoration: const BoxDecoration(
+                                                      color: Colors.white12,
+                                                      shape: BoxShape.circle,
+                                                    ),
                                                   ),
+                                                  child: const SizedBox.expand(),
                                                 ),
                                       errorBuilder: (_, __, ___) => _avatarInitials(profile.initials),
                                     )
@@ -725,15 +732,18 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
                 boxShadow: RodMaeColors.goldGlow(),
               ),
               child: _savingProfile
-                  ? const Center(
-                      child: SizedBox(
+                  ? AdvancedLoadingEffect(
+                      isLoading: true,
+                      shape: BoxShape.circle,
+                      placeholder: Container(
                         width: 18,
                         height: 18,
-                        child: CircularProgressIndicator(
-                          color: Colors.white,
-                          strokeWidth: 2,
+                        decoration: const BoxDecoration(
+                          color: Colors.white38,
+                          shape: BoxShape.circle,
                         ),
                       ),
+                      child: const SizedBox(width: 18, height: 18),
                     )
                   : Row(
                       mainAxisAlignment: MainAxisAlignment.center,

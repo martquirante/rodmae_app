@@ -15,9 +15,8 @@
     <!-- Wake up device for notifications -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.VIBRATE" />
-
     <application
-        android:label="rodmae_app"
+        android:label="RodMae App"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
 

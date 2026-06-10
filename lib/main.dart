@@ -5,6 +5,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:flutter_native_splash/flutter_native_splash.dart';
 
 import 'firebase_options.dart';
 import 'core/theme.dart';
@@ -13,6 +14,9 @@ import 'services/firebase_service.dart';
 import 'services/auth_service.dart';
 import 'services/supabase_service.dart';
 import 'services/notification_service.dart';
+import 'services/presence_controller.dart';
+import 'services/connectivity_service.dart';
+import 'widgets/network_banner.dart';
 import 'models/meal_plan.dart';
 import 'models/couple_location.dart';
 import 'package:geolocator/geolocator.dart';
@@ -35,7 +39,14 @@ import 'package:latlong2/latlong.dart' hide Path;
 
 
 Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+  // ── 1. Binding must be initialized before anything else ────────────────────
+  final widgetsBinding = WidgetsFlutterBinding.ensureInitialized();
+
+  // ── 2. Preserve the native splash until we explicitly remove it ────────────
+  //    The OS will keep showing the splash screen drawn by flutter_native_splash
+  //    while Flutter engine warms up and our services initialize.
+  FlutterNativeSplash.preserve(widgetsBinding: widgetsBinding);
+
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
     DeviceOrientation.portraitDown,
@@ -48,6 +59,8 @@ Future<void> main() async {
     ),
   );
 
+  // ── 3. Kick off async service initialization (Firebase, Supabase, etc.) ────
+  //    FlutterNativeSplash.remove() is called inside initialize() once done.
   final startupFuture = AppBootstrapper().initialize();
   runApp(RodMaeApp(startupFuture: startupFuture));
 }
@@ -71,6 +84,10 @@ class RodMaeApp extends StatelessWidget {
           theme: RodMaeTheme.lightTheme,
           darkTheme: RodMaeTheme.darkTheme,
           themeMode: currentMode,
+          // ── Global network banner layer wraps every route ──────────────────
+          builder: (context, child) => NetworkStatusBannerHost(
+            child: child ?? const SizedBox.shrink(),
+          ),
           initialRoute: '/',
           onGenerateRoute: (settings) {
             Widget page;
@@ -228,6 +245,10 @@ class _MainNavigationShellState extends State<MainNavigationShell>
     _startBackgroundLocationTracking();
     _subscribeSignalBroadcast();
     WidgetsBinding.instance.addObserver(this);
+
+    // Attach global presence tracking for the active partner
+    PresenceController.instance.attach(PartnerIdentity.active.value.label);
+    PartnerIdentity.active.addListener(_updatePresenceAttachment);
   }
 
   void _onMainTabNotifierChanged() {
@@ -236,6 +257,10 @@ class _MainNavigationShellState extends State<MainNavigationShell>
         _index = AppNotificationNavigation.mainTabNotifier.value;
       });
     }
+  }
+
+  void _updatePresenceAttachment() {
+    PresenceController.instance.attach(PartnerIdentity.active.value.label);
   }
 
   /// Called when an FCM foreground message arrives with type='signal'.
@@ -490,7 +515,7 @@ class _MainNavigationShellState extends State<MainNavigationShell>
 
       if (_lastSpouseStatus != currentStatus) {
         _lastSpouseStatus = currentStatus;
-        final spouseName = PartnerIdentity.active.value == PartnerProfile.rodel ? 'Mary Mae' : 'Rodel';
+        final spouseName = PartnerIdentity.active.value == PartnerProfile.rodel ? 'Eurine' : 'Rodel';
         
         AppNotificationNavigation.show(
           title: 'Spouse Location Update',
@@ -553,7 +578,9 @@ class _MainNavigationShellState extends State<MainNavigationShell>
     AppNotificationNavigation.mainTabNotifier.removeListener(_onMainTabNotifierChanged);
     NotificationService.loveSignalNotifier.removeListener(_onFcmLoveSignal);
     NotificationService.surpriseNoteNotifier.removeListener(_onFcmSurpriseNote);
+    PartnerIdentity.active.removeListener(_updatePresenceAttachment);
     WidgetsBinding.instance.removeObserver(this);
+    PresenceController.instance.detach();
     _signalsSub?.cancel();
     _chatSub?.cancel();
     _notesSub?.cancel();
@@ -655,9 +682,17 @@ final class AppBootstrapper {
     // Load cached session for bypass credentials
     await AuthService.loadCachedSession();
 
+    // ── Start background connectivity supervisor ────────────────────────────
+    await ConnectivityService.instance.initialize();
+
     AppRuntime.firebaseReady = firebaseReady;
     AppRuntime.supabaseReady = supabaseReady;
     AppRuntime.startupIssue = issues.isEmpty ? null : issues.join('\n');
+
+    // ── 4. All services are ready — dismiss the native splash screen ──────────
+    //    Flutter will now paint its first frame (your SplashScreen widget)
+    //    and the native splash will cross-fade out seamlessly.
+    FlutterNativeSplash.remove();
 
     return AppStartupStatus(
       firebaseReady: firebaseReady,

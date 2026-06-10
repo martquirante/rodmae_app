@@ -17,6 +17,10 @@ import '../services/firebase_service.dart';
 import '../widgets/animated_3d_card.dart';
 import '../widgets/glass_card.dart';
 import '../widgets/isometric_markers.dart';
+import '../services/realtime_marker_controller.dart';
+import '../services/presence_controller.dart';
+import '../widgets/advanced_loading_effect.dart';
+
 
 enum MapType { street, satellite, hybrid }
 
@@ -91,15 +95,19 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   // ── Presence tracking ────────────────────────────────────────────────────
   DateTime? _spouseLastSeen;
   bool _isSpouseOnline = false;
+  StreamSubscription<PresenceState>? _spousePresenceSub;
+  DateTime? _spouseLastLocationTime;
 
   // ── Smooth lerp animation for spouse marker ──────────────────────────────
-  LatLng? _spouseFromLoc;    // lerp start position
-  LatLng? _spouseTargetLoc;  // lerp end / current target
-  AnimationController? _spouseLerpController;
+  LatLng? _spouseTargetLoc;  // lerp end / current target (kept for focus/pin check)
+  
+  // ── Realtime Marker Controllers ──────────────────────────────────────────
+  RealtimeAnimatedMarkerController? _myLocationController;
+  RealtimeAnimatedMarkerController? _spouseLocationController;
+  RealtimeAnimatedMarkerController? _simulatedVehicleController;
 
   // ── Timers ───────────────────────────────────────────────────────────────
   Timer? _heartbeatTimer;
-  Timer? _presenceRefreshTimer;
 
   // ── Supabase Realtime broadcast channel for < 100 ms location delivery ───
   RealtimeChannel? _locationBroadcastChannel;
@@ -198,12 +206,37 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   void initState() {
     super.initState();
 
-    // Smooth lerp controller for spouse marker movement (60 fps rebuild)
-    _spouseLerpController = AnimationController(
+    // Ensure active profile matches the current authenticated user
+    final user = AuthService.instance.currentUser;
+    if (user != null) {
+      PartnerIdentity.setFromEmail(user.email);
+    }
+
+    // Realtime Marker Controllers (position gliders, bearing calculators, and frame animators)
+    _myLocationController = RealtimeAnimatedMarkerController(
       vsync: this,
-      duration: const Duration(milliseconds: 650),
+      initialPosition: _myLocation,
+      initialMode: TransitMode.walking,
     );
-    _spouseLerpController!.addListener(() {
+    _myLocationController!.addListener(() {
+      if (mounted) setState(() {});
+    });
+
+    _spouseLocationController = RealtimeAnimatedMarkerController(
+      vsync: this,
+      initialPosition: _spouseLocation,
+      initialMode: TransitMode.walking,
+    );
+    _spouseLocationController!.addListener(() {
+      if (mounted) setState(() {});
+    });
+
+    _simulatedVehicleController = RealtimeAnimatedMarkerController(
+      vsync: this,
+      initialPosition: _simulatedVehiclePosition,
+      initialMode: TransitMode.driving,
+    );
+    _simulatedVehicleController!.addListener(() {
       if (mounted) setState(() {});
     });
 
@@ -217,14 +250,19 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       if (_myLocation != null) _broadcastLocation(_myLocation!);
     });
 
-    // Refresh the online/offline indicator every 15 s
-    _presenceRefreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+    // Subscribe to spouse presence updates from PresenceController (single source of truth)
+    final spouseName = PartnerIdentity.active.value == PartnerProfile.rodel
+        ? PartnerProfile.maryMae.label
+        : PartnerProfile.rodel.label;
+    _spousePresenceSub = PresenceController.instance
+        .watchPresence(spouseName)
+        .listen((state) {
       if (mounted) {
         setState(() {
-          _isSpouseOnline = _spouseLastSeen != null &&
-              DateTime.now()
-                  .difference(_spouseLastSeen!)
-                  .inSeconds < 90;
+          _isSpouseOnline = state.isOnline;
+          if (state.lastSeen != null) {
+            _spouseLastSeen = state.lastSeen;
+          }
         });
       }
     });
@@ -252,12 +290,14 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   void dispose() {
     _positionStreamSub?.cancel();
     _locationsSub?.cancel();
+    _spousePresenceSub?.cancel();
     _transitSimController?.dispose();
-    _spouseLerpController?.dispose();
+    _myLocationController?.dispose();
+    _spouseLocationController?.dispose();
+    _simulatedVehicleController?.dispose();
     _searchController.dispose();
     _debounce?.cancel();
     _heartbeatTimer?.cancel();
-    _presenceRefreshTimer?.cancel();
     _unsubscribeBroadcast();
     super.dispose();
   }
@@ -296,6 +336,19 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       );
       final latLng = LatLng(pos.latitude, pos.longitude);
       setState(() => _myLocation = latLng);
+      
+      // Infer transit mode based on speed
+      TransitMode inferredMode = TransitMode.walking;
+      final speedKmh = pos.speed * 3.6;
+      if (speedKmh > 45.0) {
+        inferredMode = TransitMode.driving;
+      } else if (speedKmh > 20.0) {
+        inferredMode = TransitMode.motorcycle;
+      } else if (speedKmh > 6.0) {
+        inferredMode = TransitMode.bicycling;
+      }
+      _myLocationController?.updatePosition(latLng, newMode: inferredMode);
+      
       _mapController.move(latLng, 14.5);
       
       // Upsert live location to database
@@ -312,6 +365,19 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       final latLng = LatLng(pos.latitude, pos.longitude);
       if (mounted) {
         setState(() => _myLocation = latLng);
+        
+        // Infer transit mode based on speed
+        TransitMode inferredMode = TransitMode.walking;
+        final speedKmh = pos.speed * 3.6;
+        if (speedKmh > 45.0) {
+          inferredMode = TransitMode.driving;
+        } else if (speedKmh > 20.0) {
+          inferredMode = TransitMode.motorcycle;
+        } else if (speedKmh > 6.0) {
+          inferredMode = TransitMode.bicycling;
+        }
+        _myLocationController?.updatePosition(latLng, newMode: inferredMode);
+        
         _updateLiveLocationInDatabase(latLng);
       }
     });
@@ -453,49 +519,39 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   /// Smoothly interpolates the map marker from the previous to the new position.
   void _onNewSpouseLocation(LatLng newLoc, DateTime? lastSeen) {
     if (!mounted) return;
-    final ctrl = _spouseLerpController;
-    if (ctrl == null) {
-      setState(() {
-        _spouseFromLoc = newLoc;
-        _spouseTargetLoc = newLoc;
-      });
-      return;
-    }
 
-    // Mid-animation? Compute current interpolated position as new start.
-    LatLng from;
-    if (_spouseFromLoc != null &&
-        _spouseTargetLoc != null &&
-        ctrl.isAnimating) {
-      final t = Curves.easeOutCubic.transform(ctrl.value.clamp(0.0, 1.0));
-      from = LatLng(
-        _spouseFromLoc!.latitude +
-            (_spouseTargetLoc!.latitude - _spouseFromLoc!.latitude) * t,
-        _spouseFromLoc!.longitude +
-            (_spouseTargetLoc!.longitude - _spouseFromLoc!.longitude) * t,
-      );
-    } else {
-      from = _spouseTargetLoc ?? newLoc;
-    }
-
-    // Only update last-seen if this timestamp is newer
     final effectiveLastSeen = lastSeen?.toLocal() ?? DateTime.now();
-    final isNewer = _spouseLastSeen == null ||
-        effectiveLastSeen.isAfter(_spouseLastSeen!);
+
+    // Determine transit mode based on speed
+    TransitMode inferredMode = TransitMode.walking;
+    if (_spouseLastLocationTime != null && _spouseLocationController?.position != null) {
+      final double distance = Geolocator.distanceBetween(
+        _spouseLocationController!.position!.latitude,
+        _spouseLocationController!.position!.longitude,
+        newLoc.latitude,
+        newLoc.longitude,
+      );
+      final int seconds = effectiveLastSeen.difference(_spouseLastLocationTime!).inSeconds;
+      if (seconds > 0) {
+        final speedMps = distance / seconds;
+        final speedKmh = speedMps * 3.6;
+        if (speedKmh > 45.0) {
+          inferredMode = TransitMode.driving;
+        } else if (speedKmh > 20.0) {
+          inferredMode = TransitMode.motorcycle;
+        } else if (speedKmh > 6.0) {
+          inferredMode = TransitMode.bicycling;
+        }
+      }
+    }
+
+    _spouseLocationController?.updatePosition(newLoc, newMode: inferredMode);
 
     setState(() {
-      _spouseFromLoc = from;
       _spouseTargetLoc = newLoc;
-      if (isNewer) {
-        _spouseLastSeen = effectiveLastSeen;
-        _isSpouseOnline = DateTime.now()
-                .difference(effectiveLastSeen)
-                .inSeconds <
-            90;
-      }
+      _spouseLocation = newLoc; // keep for backward compatibility
+      _spouseLastLocationTime = effectiveLastSeen;
     });
-
-    ctrl.forward(from: 0);
   }
 
   // ── Presence helpers ─────────────────────────────────────────────────────
@@ -609,12 +665,31 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       return;
     }
 
+    // Resolve user from Auth first to ensure correct active user state
+    final user = AuthService.instance.currentUser;
+    if (user != null) {
+      PartnerIdentity.setFromEmail(user.email);
+    }
+
     // Trigger love signal to other spouse
     SupabaseWeddingRepository.instance
         .insertLoveTrigger('Heading Home')
         .catchError((_) {});
 
     _transitSimController?.dispose();
+    
+    // Reset simulated vehicle controller to start of route to prevent flying/gliding from previous locations
+    _simulatedVehiclePosition = _routePoints.first;
+    _simulatedVehicleController?.dispose();
+    _simulatedVehicleController = RealtimeAnimatedMarkerController(
+      vsync: this,
+      initialPosition: _routePoints.first,
+      initialMode: mode,
+    );
+    _simulatedVehicleController!.addListener(() {
+      if (mounted) setState(() {});
+    });
+
     setState(() {
       _activeTransitMode = mode;
       _isSimulatingTransit = true;
@@ -636,12 +711,23 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           _isSimulatingTransit = false;
           _simulatedVehiclePosition = null;
         });
+        
+        // Update database with final home location arrival
+        if (_homeLocation != null) {
+          _updateLiveLocationInDatabase(_homeLocation!).catchError((_) {});
+        }
+        
         _showSuccessSnackBar('You have arrived home safely! ❤️');
       } else {
         // Interpolate along route points
+        final newPos = _interpolateRoutePosition(val);
         setState(() {
-          _simulatedVehiclePosition = _interpolateRoutePosition(val);
+          _simulatedVehiclePosition = newPos;
         });
+        _simulatedVehicleController?.updatePosition(newPos, newMode: mode);
+        
+        // Update user live location in database and broadcast to spouse in real-time
+        _updateLiveLocationInDatabase(newPos).catchError((_) {});
       }
     });
 
@@ -692,66 +778,63 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     // ── Build markers ────────────────────────────────────────────────────
     final markers = <Marker>[];
 
-    // Compute smooth lerped spouse render position
-    LatLng? spouseRenderPos;
-    if (_spouseFromLoc != null &&
-        _spouseTargetLoc != null &&
-        _spouseLerpController != null) {
-      final t = Curves.easeOutCubic
-          .transform(_spouseLerpController!.value.clamp(0.0, 1.0));
-      spouseRenderPos = LatLng(
-        _spouseFromLoc!.latitude +
-            (_spouseTargetLoc!.latitude - _spouseFromLoc!.latitude) * t,
-        _spouseFromLoc!.longitude +
-            (_spouseTargetLoc!.longitude - _spouseFromLoc!.longitude) * t,
-      );
-    } else {
-      spouseRenderPos = _spouseTargetLoc;
-    }
-
     final myName = PartnerIdentity.active.value.label;
     final spouseName = PartnerIdentity.active.value == PartnerProfile.rodel
         ? PartnerProfile.maryMae.label
         : PartnerProfile.rodel.label;
 
     // My marker (always online while visible)
-    if (_myLocation != null && !_isSimulatingTransit) {
+    if (_myLocationController?.position != null && !_isSimulatingTransit) {
       markers.add(
         Marker(
-          point: _myLocation!,
-          width: 92,
-          height: 116,
+          point: _myLocationController!.position!,
+          width: 110,
+          height: 135,
           alignment: Alignment.topCenter,
-          child: PersonGameMarker(
-            name: myName,
-            markerColor: RodMaeColors.electricBlue,
-            presence: PresenceStatus.online,
-            avatarUrl: _myAvatarUrl,
-            initials: myName.substring(0, 1),
-            isMe: true,
-          ),
+          rotate: true, // Marker rotates to maintain orientation relative to the map
+          child: _myLocationController!.isMoving
+              ? Animated3DTrackingMarker(
+                  controller: _myLocationController!,
+                  label: myName,
+                  markerColor: RodMaeColors.electricBlue,
+                )
+              : PersonGameMarker(
+                  name: myName,
+                  markerColor: RodMaeColors.electricBlue,
+                  presence: PresenceStatus.online,
+                  avatarUrl: _myAvatarUrl,
+                  initials: myName.substring(0, 1),
+                  isMe: true,
+                ),
         ),
       );
     }
 
     // Spouse marker — lerp animated, presence-aware
-    if (spouseRenderPos != null) {
+    if (_spouseLocationController?.position != null) {
       markers.add(
         Marker(
-          point: spouseRenderPos,
-          width: 92,
-          height: 116,
+          point: _spouseLocationController!.position!,
+          width: 110,
+          height: 135,
           alignment: Alignment.topCenter,
-          child: PersonGameMarker(
-            name: spouseName,
-            markerColor: RodMaeColors.rose,
-            presence:
-                _isSpouseOnline ? PresenceStatus.online : PresenceStatus.offline,
-            avatarUrl: _spouseAvatarUrl,
-            initials: spouseName.substring(0, 1),
-            lastSeenLabel:
-                _spouseLastSeen != null ? _timeAgo(_spouseLastSeen!) : null,
-          ),
+          rotate: true, // Marker rotates to maintain orientation relative to the map
+          child: _spouseLocationController!.isMoving
+              ? Animated3DTrackingMarker(
+                  controller: _spouseLocationController!,
+                  label: spouseName,
+                  markerColor: RodMaeColors.rose,
+                )
+              : PersonGameMarker(
+                  name: spouseName,
+                  markerColor: RodMaeColors.rose,
+                  presence:
+                      _isSpouseOnline ? PresenceStatus.online : PresenceStatus.offline,
+                  avatarUrl: _spouseAvatarUrl,
+                  initials: spouseName.substring(0, 1),
+                  lastSeenLabel:
+                      _spouseLastSeen != null ? _timeAgo(_spouseLastSeen!) : null,
+                ),
         ),
       );
     }
@@ -761,8 +844,8 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       markers.add(
         Marker(
           point: _homeLocation!,
-          width: 95,
-          height: 105,
+          width: 120,
+          height: 135,
           alignment: Alignment.topCenter,
           child: IsometricMarker(
             type: 'home',
@@ -778,8 +861,8 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       markers.add(
         Marker(
           point: _myWorkLocation!,
-          width: 95,
-          height: 105,
+          width: 120,
+          height: 135,
           alignment: Alignment.topCenter,
           child: IsometricMarker(
             type: 'work',
@@ -795,8 +878,8 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       markers.add(
         Marker(
           point: _spouseWorkLocation!,
-          width: 95,
-          height: 105,
+          width: 120,
+          height: 135,
           alignment: Alignment.topCenter,
           child: IsometricMarker(
             type: 'work',
@@ -828,8 +911,8 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       markers.add(
         Marker(
           point: _pinnedLocationPreview!,
-          width: 85,
-          height: 85,
+          width: 120,
+          height: 135,
           alignment: Alignment.topCenter,
           child: const IsometricMarker(
             type: 'home',
@@ -842,13 +925,14 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     }
 
     // Simulated Vehicle Marker
-    if (_simulatedVehiclePosition != null && _activeTransitMode != null) {
+    if (_simulatedVehicleController?.position != null && _activeTransitMode != null) {
       markers.add(
         Marker(
-          point: _simulatedVehiclePosition!,
-          width: 85,
-          height: 85,
+          point: _simulatedVehicleController!.position!,
+          width: 110,
+          height: 135,
           alignment: Alignment.topCenter,
+          rotate: true, // Marker rotates to maintain orientation relative to the map
           child: _buildVehicleMarker(_activeTransitMode!),
         ),
       );
@@ -972,13 +1056,18 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                         ),
                       ),
                       if (_isSearching)
-                        const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: RodMaeColors.gold,
+                        AdvancedLoadingEffect(
+                          isLoading: true,
+                          shape: BoxShape.circle,
+                          placeholder: Container(
+                            width: 18,
+                            height: 18,
+                            decoration: const BoxDecoration(
+                              color: Colors.white38,
+                              shape: BoxShape.circle,
+                            ),
                           ),
+                          child: const SizedBox(width: 18, height: 18),
                         )
                       else
                         IconButton(
@@ -1315,6 +1404,11 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               bottom: 24,
               child: ElevatedButton.icon(
                 onPressed: () {
+                  // Resolve user from Auth first to ensure correct active user state
+                  final user = AuthService.instance.currentUser;
+                  if (user != null) {
+                    PartnerIdentity.setFromEmail(user.email);
+                  }
                   if (_myLocation != null && _homeLocation != null) {
                     _fetchRoute(_myLocation!, _homeLocation!);
                   } else {
@@ -1447,13 +1541,18 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: RodMaeColors.gold,
+                            AdvancedLoadingEffect(
+                              isLoading: true,
+                              shape: BoxShape.circle,
+                              placeholder: Container(
+                                width: 16,
+                                height: 16,
+                                decoration: const BoxDecoration(
+                                  color: Colors.white38,
+                                  shape: BoxShape.circle,
+                                ),
                               ),
+                              child: const SizedBox(width: 16, height: 16),
                             ),
                             const SizedBox(width: 10),
                             Text(
@@ -1620,23 +1719,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     );
   }
 
-  // Kept for backward compatibility; now delegates to PersonGameMarker
-  Widget _buildUserMarker(
-    String name,
-    bool isMe, {
-    PresenceStatus presence = PresenceStatus.online,
-    String? lastSeenLabel,
-  }) {
-    return PersonGameMarker(
-      name: name,
-      markerColor: isMe ? RodMaeColors.electricBlue : RodMaeColors.rose,
-      presence: presence,
-      avatarUrl: isMe ? _myAvatarUrl : _spouseAvatarUrl,
-      initials: name.substring(0, 1),
-      lastSeenLabel: lastSeenLabel,
-      isMe: isMe,
-    );
-  }
+
 
   // ── Presence HUD (floating chip shown when spouse is detected offline) ────
   Widget _buildPresenceHud(bool isDark) {
@@ -1715,13 +1798,19 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     );
   }
 
-  // 3D/Isometric vehicle marker via IsometricMarker
+  // 3D/Isometric vehicle marker via Animated3DTrackingMarker
   Widget _buildVehicleMarker(TransitMode mode) {
-    return IsometricMarker(
-      type: mode.name,
-      label: mode.label,
-      color: mode.color,
-      isAnimated: true,
+    // Resolve user from Auth first to ensure correct active user state
+    final user = AuthService.instance.currentUser;
+    if (user != null) {
+      PartnerIdentity.setFromEmail(user.email);
+    }
+    final myName = PartnerIdentity.active.value.label;
+    
+    return Animated3DTrackingMarker(
+      controller: _simulatedVehicleController!,
+      label: myName,
+      markerColor: mode.color,
     );
   }
 

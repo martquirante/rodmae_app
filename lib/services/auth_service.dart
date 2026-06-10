@@ -7,8 +7,8 @@ enum PartnerProfile {
   maryMae;
 
   String get label => switch (this) {
-        PartnerProfile.rodel => 'Rodel',
-        PartnerProfile.maryMae => 'Mary Mae',
+        PartnerProfile.rodel   => 'Rodel',
+        PartnerProfile.maryMae => 'Eurine',
       };
 
   String get initials => switch (this) {
@@ -44,7 +44,8 @@ final class PartnerIdentity {
     final lower = email.toLowerCase();
     if (lower.contains('rodel')) {
       active.value = PartnerProfile.rodel;
-    } else if (lower.contains('mary') || lower.contains('mae') || lower.contains('eurine')) {
+    } else if (lower.contains('mary') || lower.contains('mae') ||
+        lower.contains('eurine')) {
       active.value = PartnerProfile.maryMae;
     }
   }

@@ -23,6 +23,7 @@ import '../widgets/common_widgets.dart';
 import '../widgets/love_overlay.dart';
 import '../widgets/isometric_markers.dart';
 import '../widgets/cinematic_envelope.dart';
+import '../widgets/advanced_loading_effect.dart';
 
 class HomeDashboardScreen extends StatefulWidget {
   final AppStartupStatus startup;
@@ -42,15 +43,19 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen>
   late final AnimationController _lottieController;
   int _refreshCount = 0;
 
+  bool _isRefreshing = false;
+
   Future<void> _handleRefresh() async {
+    if (_isRefreshing) return;
     HapticFeedback.mediumImpact();
+    setState(() => _isRefreshing = true);
     try {
       await Future.wait([
         SupabaseWeddingRepository.instance.fetchNotes(),
         SupabaseWeddingRepository.instance.fetchLoveTriggers(),
         SupabaseWeddingRepository.instance.fetchFinances(),
         SupabaseWeddingRepository.instance.fetchUserProfile('Rodel'),
-        SupabaseWeddingRepository.instance.fetchUserProfile('Mary Mae'),
+        SupabaseWeddingRepository.instance.fetchUserProfile('Eurine'),
         SupabaseWeddingRepository.instance.fetchLocations(),
       ]);
     } catch (e) {
@@ -58,6 +63,7 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen>
     }
     if (mounted) {
       setState(() {
+        _isRefreshing = false;
         _refreshCount++;
       });
     }
@@ -135,15 +141,22 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen>
   }
 
   Future<void> _triggerLove(LoveTrigger trigger) async {
-    HapticFeedback.heavyImpact();
-    setState(() => _activeTrigger = trigger);
-    _lottieController
-      ..reset()
-      ..forward();
+    final isHeadingHome = trigger.title == 'Heading Home';
+
+    if (!isHeadingHome) {
+      HapticFeedback.heavyImpact();
+      setState(() => _activeTrigger = trigger);
+      _lottieController
+        ..reset()
+        ..forward();
+    } else {
+      // Navigate straight to the map screen immediately
+      Navigator.of(context).pushNamed('/map', arguments: {'autoHeadingHome': true});
+    }
 
     final sender = PartnerIdentity.active.value.label;
     if (!AppRuntime.supabaseReady) {
-      if (mounted) {
+      if (mounted && !isHeadingHome) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text(
@@ -164,25 +177,17 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen>
         sender: sender,
         triggerType: trigger.title,
       );
-      if (mounted) {
+      if (mounted && !isHeadingHome) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('${trigger.title} sent to your spouse.')),
         );
       }
     } catch (error) {
-      if (mounted) {
+      if (mounted && !isHeadingHome) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Love signal failed to sync: $error')),
         );
       }
-    }
-
-    if (trigger.title == 'Heading Home') {
-      Future.delayed(const Duration(milliseconds: 800), () {
-        if (mounted) {
-          Navigator.of(context).pushNamed('/map', arguments: {'autoHeadingHome': true});
-        }
-      });
     }
   }
 
@@ -315,15 +320,14 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen>
       children: [
         RodMaePageFrame(
           child: RefreshIndicator(
-            color: RodMaeColors.electricBlue,
-            backgroundColor: Theme.of(context).brightness == Brightness.dark
-                ? RodMaeColors.navy2
-                : Colors.white,
+            color: Colors.transparent,
+            backgroundColor: Colors.transparent,
+            displacement: 140.0,
             onRefresh: _handleRefresh,
-            child: ListView(
-              physics: const AlwaysScrollableScrollPhysics(
-                parent: BouncingScrollPhysics(),
-              ),
+            child: AdvancedLoadingEffect(
+              isLoading: _isRefreshing,
+              child: ListView(
+              physics: const AlwaysScrollableScrollPhysics(),
               padding: const EdgeInsets.fromLTRB(18, 8, 18, 108),
               children: [
                 _WeddingLockCard(startup: widget.startup),
@@ -355,6 +359,7 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen>
                   child: CoupleMapCard(key: ValueKey('map_$_refreshCount')),
                 ),
               ],
+            ),
             ),
           ),
         ),
@@ -631,7 +636,7 @@ class SurpriseNoteCard extends StatelessWidget {
         }
 
         final spouseLabel = PartnerIdentity.active.value == PartnerProfile.rodel
-            ? 'Mary Mae'
+            ? 'Eurine'
             : 'Rodel';
         
         final spouseNotes = snapshot.data!
@@ -871,7 +876,7 @@ class _CoupleMapCardState extends State<CoupleMapCard> {
   Future<void> _loadAvatars() async {
     try {
       final rProfile = await SupabaseWeddingRepository.instance.fetchUserProfile('Rodel');
-      final mProfile = await SupabaseWeddingRepository.instance.fetchUserProfile('Mary Mae');
+      final mProfile = await SupabaseWeddingRepository.instance.fetchUserProfile('Eurine');
       if (mounted) {
         setState(() {
           _rodelAvatarUrl = rProfile?.avatarUrl;
@@ -1026,7 +1031,7 @@ class _CoupleMapCardState extends State<CoupleMapCard> {
           );
         }
 
-        // Helper to check where Rodel and Mary Mae are
+        // Helper to check where Rodel and Eurine are
         String getStatusText() {
           LatLng? rLoc = rodelLoc;
           LatLng? mLoc = maryLoc;
@@ -1058,13 +1063,13 @@ class _CoupleMapCardState extends State<CoupleMapCard> {
           }
 
           if (rLoc == null) {
-            return 'Mary Mae is $mStatus. Rodel\'s location is offline.';
+            return 'Eurine is $mStatus. Rodel\'s location is offline.';
           }
           if (mLoc == null) {
-            return 'Rodel is $rStatus. Mary Mae\'s location is offline.';
+            return 'Rodel is $rStatus. Eurine\'s location is offline.';
           }
 
-          return 'Mary Mae is $mStatus. Rodel is $rStatus.';
+          return 'Eurine is $mStatus. Rodel is $rStatus.';
         }
 
         // Build list of markers to display on dashboard map card
@@ -1082,14 +1087,14 @@ class _CoupleMapCardState extends State<CoupleMapCard> {
           );
         }
 
-        // Mary Mae live (only add if present)
+        // Eurine live (only add if present)
         if (maryLoc != null) {
           markers.add(
             Marker(
               point: maryLoc,
               width: 75,
               height: 65,
-              child: _buildDashboardUserMarker('Mary Mae', RodMaeColors.rose, Icons.home_rounded),
+              child: _buildDashboardUserMarker('Eurine', RodMaeColors.rose, Icons.home_rounded),
             ),
           );
         }
@@ -1195,7 +1200,7 @@ class _CoupleMapCardState extends State<CoupleMapCard> {
                             ),
                             const SizedBox(width: 6),
                             _buildMiniFocusButton(
-                              label: 'Mary Mae',
+                              label: 'Eurine',
                               child: CircleAvatar(
                                 radius: 9,
                                 backgroundColor: RodMaeColors.rose,
@@ -1209,7 +1214,7 @@ class _CoupleMapCardState extends State<CoupleMapCard> {
                                   _animateMapTo(maryLoc, 13.5);
                                 } else {
                                   ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(content: Text('Mary Mae\'s location is offline.')),
+                                    const SnackBar(content: Text('Eurine\'s location is offline.')),
                                   );
                                 }
                               },

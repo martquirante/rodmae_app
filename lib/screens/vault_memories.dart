@@ -2,13 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../core/theme.dart';
-import '../core/constants.dart';
 import '../core/utils.dart';
 import '../models/vault_document.dart';
 import '../models/meal_plan.dart';
 import '../services/supabase_service.dart';
 import '../widgets/glass_card.dart';
 import '../widgets/common_widgets.dart';
+import '../widgets/advanced_loading_effect.dart';
 
 class VaultMemoriesScreen extends StatefulWidget {
   const VaultMemoriesScreen({super.key});
@@ -156,9 +156,25 @@ class _VaultDocumentsTabState extends State<VaultDocumentsTab> {
             ),
             const SizedBox(height: 14),
             if (snapshot.connectionState == ConnectionState.waiting)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 30),
-                child: Center(child: CircularProgressIndicator()),
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: AdvancedLoadingEffect(
+                  isLoading: true,
+                  placeholder: Column(
+                    children: List.generate(
+                      3,
+                      (index) => Container(
+                        height: 72,
+                        margin: const EdgeInsets.only(bottom: 10),
+                        decoration: BoxDecoration(
+                          color: Colors.white12,
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                    ),
+                  ),
+                  child: const SizedBox(height: 236),
+                ),
               )
             else if (docs.isEmpty)
               Padding(
@@ -320,7 +336,22 @@ class _GoalsChecklistTabState extends State<GoalsChecklistTab> {
       stream: SupabaseWeddingRepository.instance.watchChecklist(),
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
+          return AdvancedLoadingEffect(
+            isLoading: true,
+            placeholder: ListView.separated(
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+              itemCount: 4,
+              separatorBuilder: (_, index) => const SizedBox(height: 12),
+              itemBuilder: (_, index) => Container(
+                height: 64,
+                decoration: BoxDecoration(
+                  color: Colors.white12,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+              ),
+            ),
+            child: const SizedBox.expand(),
+          );
         }
 
         final goals = snapshot.data ?? <GoalItem>[];
@@ -381,10 +412,18 @@ class _GoalsChecklistTabState extends State<GoalsChecklistTab> {
                   backgroundColor: RodMaeColors.electricBlue,
                   foregroundColor: Colors.white,
                   child: _adding
-                      ? const SizedBox(
-                          width: 15,
-                          height: 15,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                      ? AdvancedLoadingEffect(
+                          isLoading: true,
+                          shape: BoxShape.circle,
+                          placeholder: Container(
+                            width: 15,
+                            height: 15,
+                            decoration: const BoxDecoration(
+                              color: Colors.white38,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          child: const SizedBox(width: 15, height: 15),
                         )
                       : const Icon(Icons.add_rounded),
                 ),
@@ -504,7 +543,7 @@ class _MemoriesCoverFlowTabState extends State<MemoriesCoverFlowTab> {
       imageUrl: 'https://images.unsplash.com/photo-1511285560929-80b456fea0bc?w=900&q=85',
       title: 'Wedding Nuptials',
       dateLabel: '2026-06-03',
-      caption: 'The day Rodel and Mary Mae become one household.',
+      caption: 'The day Rodel and Eurine become one household.',
     ),
   ];
 
@@ -627,7 +666,6 @@ class MemoryCoverCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
       decoration: BoxDecoration(
@@ -660,9 +698,16 @@ class MemoryCoverCard extends StatelessWidget {
                 if (progress == null) {
                   return child;
                 }
-                return const DecoratedBox(
-                  decoration: BoxDecoration(color: RodMaeColors.navy),
-                  child: Center(child: CircularProgressIndicator()),
+                return AdvancedLoadingEffect(
+                  isLoading: true,
+                  placeholder: Container(
+                    decoration: const BoxDecoration(
+                      color: Colors.white12,
+                    ),
+                  ),
+                  child: Container(
+                    color: Colors.transparent,
+                  ),
                 );
               },
               errorBuilder: (context, error, stackTrace) {

@@ -278,6 +278,8 @@ final class SupabaseWeddingRepository {
       'couple_id': AppConfig.coupleId,
       'sender': PartnerIdentity.active.value.label,
       'message': message,
+      'status': 'sent',
+      'message_type': 'text',
       'created_at': DateTime.now().toIso8601String(),
     };
     final cached = await _loadCache('cached_chat');
@@ -290,11 +292,57 @@ final class SupabaseWeddingRepository {
           'couple_id': AppConfig.coupleId,
           'sender': PartnerIdentity.active.value.label,
           'message': message,
+          'status': 'sent',
+          'message_type': 'text',
           'created_at': DateTime.now().toIso8601String(),
         });
       }
     } catch (e) {
       print('Supabase sendChatMessage error: $e');
+    }
+  }
+
+  /// Sends a rich message (image / location / love signal) to the chat history.
+  Future<void> sendRichMessage(ChatMessage msg) async {
+    final localMap = {
+      'id': msg.id,
+      'couple_id': AppConfig.coupleId,
+      'sender': msg.sender,
+      'message': msg.message,
+      'status': msg.status.name,
+      'message_type': msg.messageType.name,
+      if (msg.imageUrl != null) 'image_url': msg.imageUrl,
+      if (msg.locationData != null) 'location_data': msg.locationData,
+      'created_at': msg.createdAt.toIso8601String(),
+    };
+    final cached = await _loadCache('cached_chat');
+    cached.add(localMap);
+    await _saveCache('cached_chat', cached);
+
+    try {
+      if (AppRuntime.supabaseReady) {
+        await _client.from('chat_history').insert(localMap);
+      }
+    } catch (e) {
+      print('Supabase sendRichMessage error: $e');
+    }
+  }
+
+  /// Marks all messages from the *partner* (not the local user) as 'seen'.
+  /// Call this when the chat tab becomes active / visible.
+  Future<void> markMessagesAsSeen() async {
+    final mySender = PartnerIdentity.active.value.label;
+    try {
+      if (AppRuntime.supabaseReady) {
+        await _client
+            .from('chat_history')
+            .update({'status': 'seen'})
+            .eq('couple_id', AppConfig.coupleId)
+            .neq('sender', mySender)
+            .inFilter('status', ['sent', 'delivered']);
+      }
+    } catch (e) {
+      print('Supabase markMessagesAsSeen error: $e');
     }
   }
 

@@ -247,7 +247,7 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
                           ),
                           const SizedBox(height: 10),
                           Text(
-                            'Rodel & Mary Mae',
+                            'Rodel & Eurine',
                             style: GoogleFonts.playfairDisplay(
                               fontSize: 34,
                               fontWeight: FontWeight.w900,

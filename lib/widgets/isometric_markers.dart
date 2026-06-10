@@ -1,6 +1,8 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../services/realtime_marker_controller.dart';
+import '../screens/map_screen.dart'; // To access TransitMode and details
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PRESENCE STATUS
@@ -827,11 +829,11 @@ class _PersonGameMarkerState extends State<PersonGameMarker>
                                 color: Colors.white,
                                 fontWeight: FontWeight.w900,
                                 fontSize: 17,
+                                ),
                               ),
-                            ),
-                          )
-                        : null,
-                  ),
+                            )
+                          : null,
+                    ),
                   // Presence dot (bottom-right)
                   Positioned(
                     right: 6,
@@ -976,16 +978,22 @@ class _IsometricMarkerState extends State<IsometricMarker>
     final wallColor = Color.lerp(Colors.white, widget.color, 0.30)!;
     return AnimatedBuilder(
       animation: _ctrl,
-      builder: (_, __) => Column(
+      builder: (context, child) => Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           SizedBox.square(
             dimension: 88,
-            child: CustomPaint(
-              painter: _HousePainter(
-                roofColor: widget.color,
-                wallColor: wallColor,
-                phase: _ctrl.value,
+            child: Image.asset(
+              'assets/maps_res/markers/home/home_marker.png',
+              fit: BoxFit.contain,
+              filterQuality: FilterQuality.high,
+              isAntiAlias: true,
+              errorBuilder: (_, _, _) => CustomPaint(
+                painter: _HousePainter(
+                  roofColor: widget.color,
+                  wallColor: wallColor,
+                  phase: _ctrl.value,
+                ),
               ),
             ),
           ),
@@ -998,15 +1006,21 @@ class _IsometricMarkerState extends State<IsometricMarker>
   Widget _buildBuilding() {
     return AnimatedBuilder(
       animation: _ctrl,
-      builder: (_, __) => Column(
+      builder: (context, child) => Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           SizedBox.square(
             dimension: 88,
-            child: CustomPaint(
-              painter: _BuildingPainter(
-                accentColor: widget.color,
-                phase: _ctrl.value,
+            child: Image.asset(
+              'assets/maps_res/markers/office/office_marker.png',
+              fit: BoxFit.contain,
+              filterQuality: FilterQuality.high,
+              isAntiAlias: true,
+              errorBuilder: (_, _, _) => CustomPaint(
+                painter: _BuildingPainter(
+                  accentColor: widget.color,
+                  phase: _ctrl.value,
+                ),
               ),
             ),
           ),
@@ -1019,7 +1033,7 @@ class _IsometricMarkerState extends State<IsometricMarker>
   Widget _buildVehicle(String type) {
     return AnimatedBuilder(
       animation: _ctrl,
-      builder: (_, __) => Column(
+      builder: (context, child) => Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           SizedBox.square(
@@ -1160,6 +1174,261 @@ class PhotorealisticMarker extends StatelessWidget {
           ],
         );
       },
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WIDGET: Animated3DTrackingMarker — PNG-asset driven live tracking marker
+//
+// WALKING (TransitMode.walking)
+//   • Cycles through assets/maps_res/walking/{person}/frame_{1-4}.png
+//   • Controller fires 100 ms frame timer only while isMoving == true
+//   • Sprite image is pinned at Alignment.bottomCenter to prevent jitter
+//   • person folder: 'rodel' or 'eurine' (derived from [label])
+//
+// VEHICLE (all other TransitMode values)
+//   • Single rear-view PNG: assets/maps_res/markers/{mode}/{stem}_rear.png
+//   • bearing rotation    → heading direction
+//   • bankAngle rotation  → Z-axis lean (Chase Camera Banking on turns)
+//
+// Both modes fall back to the _VehiclePainter canvas if the PNG is missing.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class Animated3DTrackingMarker extends StatefulWidget {
+  final RealtimeAnimatedMarkerController controller;
+
+  /// Display name of the person, used to pick the walking sprite folder.
+  /// 'Rodel' → assets/maps_res/walking/rodel/
+  /// Anything else (e.g. 'Eurine') → assets/maps_res/walking/eurine/
+  final String label;
+  final Color markerColor;
+
+  const Animated3DTrackingMarker({
+    required this.controller,
+    required this.label,
+    required this.markerColor,
+    super.key,
+  });
+
+  @override
+  State<Animated3DTrackingMarker> createState() =>
+      _Animated3DTrackingMarkerState();
+}
+
+class _Animated3DTrackingMarkerState extends State<Animated3DTrackingMarker>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _bobController;
+
+  @override
+  void initState() {
+    super.initState();
+    _bobController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1600),
+    )..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _bobController.dispose();
+    super.dispose();
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+
+  /// Determines the walking sprite sub-folder from the person's display name.
+  String get _walkingFolder =>
+      widget.label.toLowerCase().startsWith('rodel') ? 'rodel' : 'eurine';
+
+  /// Returns (asset sub-folder, image stem) for a vehicle transit mode.
+  (String, String) _vehicleAsset(TransitMode mode) {
+    return switch (mode) {
+      TransitMode.bicycling  => ('biking',     'bike'),
+      TransitMode.motorcycle => ('motorcycle', 'aerox'),
+      TransitMode.driving    => ('driving',    'everest'),
+      TransitMode.transit    => ('transit',    'bus'),
+      _                      => ('driving',    'everest'),
+    };
+  }
+
+  // ── Build ─────────────────────────────────────────────────────────────────
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: widget.controller,
+      builder: (context, _) {
+        final mode      = widget.controller.transitMode;
+        final bearing   = widget.controller.bearing;
+        final bankAngle = widget.controller.bankAngle;
+        final frame     = widget.controller.currentFrame;
+        final isMoving  = widget.controller.isMoving;
+        final isWalking = mode == TransitMode.walking;
+
+        return AnimatedBuilder(
+          animation: _bobController,
+          builder: (context, _) {
+            final bob           = _bobController.value * -4.0;
+            final shadowScale   = 1.0 - (_bobController.value * 0.12);
+            final shadowOpacity = 0.32 - (_bobController.value * 0.08);
+
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Stack(
+                  alignment: Alignment.bottomCenter,
+                  clipBehavior: Clip.none,
+                  children: [
+                    // ── Soft radial drop-shadow grounding the marker ────────
+                    Transform.scale(
+                      scaleX: shadowScale * 1.40,
+                      scaleY: shadowScale * 0.45,
+                      child: Container(
+                        width: 52,
+                        height: 18,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          gradient: RadialGradient(
+                            colors: [
+                              Colors.black.withValues(
+                                  alpha: shadowOpacity.clamp(0.0, 0.45)),
+                              Colors.black.withValues(alpha: 0.0),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+
+                    // ── Sprite / vehicle image with bobbing offset ──────────
+                    Transform.translate(
+                      offset: Offset(0, bob - 10.0),
+                      child: isWalking
+                          ? _buildWalkingSprite(frame, bearing)
+                          : _buildVehicleImage(
+                              mode, bearing, bankAngle, isMoving),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                _buildLabel(),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // ── Walking sprite: frame-cycled PNG, bottom-center pinned ───────────────
+  Widget _buildWalkingSprite(int frame, double bearing) {
+    final path =
+        'assets/maps_res/walking/$_walkingFolder/frame_$frame.png';
+    // Check if moving West/Leftwards (bearing is between -pi and 0)
+    // bearing = 0 is North, pi/2 is East, pi is South, -pi/2 is West.
+    final bool isMovingLeft = bearing < 0 && bearing > -math.pi;
+
+    return SizedBox(
+      width: 64,
+      height: 72,
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        child: Transform(
+          alignment: Alignment.center,
+          transform: isMovingLeft ? Matrix4.rotationY(math.pi) : Matrix4.identity(),
+          child: Image.asset(
+            path,
+            width: 64,
+            height: 72,
+            fit: BoxFit.contain,
+            filterQuality: FilterQuality.high,
+            isAntiAlias: true,
+            errorBuilder: (_, _, _) => CustomPaint(
+              size: const Size(64, 72),
+              painter: _VehiclePainter(
+                vehicleType: 'walking',
+                color: widget.markerColor,
+                phase: frame / 4.0,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── Vehicle image: rear-view PNG with bearing + Z-axis banking ────────────
+  Widget _buildVehicleImage(
+    TransitMode mode,
+    double bearing,
+    double bankAngle,
+    bool isMoving,
+  ) {
+    final (folder, stem) = _vehicleAsset(mode);
+    final path = 'assets/maps_res/markers/$folder/${stem}_rear.png';
+
+    // bearing  = heading rotation (which direction the vehicle faces)
+    // bankAngle = lean/tilt on Z-axis when turning (Chase Camera Banking)
+    return Transform.rotate(
+      angle: bearing,
+      child: Transform.rotate(
+        angle: bankAngle,
+        child: SizedBox(
+          width: 68,
+          height: 68,
+          child: Image.asset(
+            path,
+            width: 68,
+            height: 68,
+            fit: BoxFit.contain,
+            filterQuality: FilterQuality.high,
+            isAntiAlias: true,
+            errorBuilder: (_, _, _) => CustomPaint(
+              size: const Size(68, 68),
+              painter: _VehiclePainter(
+                vehicleType: mode.name,
+                color: widget.markerColor,
+                phase: isMoving ? 0.5 : 0.0,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── Label bubble ─────────────────────────────────────────────────────────
+  Widget _buildLabel() {
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 115),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.82),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: widget.markerColor.withValues(alpha: 0.30),
+          width: 0.8,
+        ),
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black38,
+            blurRadius: 4,
+            offset: Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Text(
+        widget.label,
+        style: GoogleFonts.inter(
+          color: Colors.white,
+          fontSize: 9,
+          fontWeight: FontWeight.w900,
+          letterSpacing: 0.4,
+        ),
+        textAlign: TextAlign.center,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+      ),
     );
   }
 }

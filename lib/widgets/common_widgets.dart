@@ -8,6 +8,8 @@ import '../core/constants.dart';
 import '../services/auth_service.dart';
 import '../services/firebase_service.dart';
 import '../services/supabase_service.dart';
+import '../services/presence_controller.dart';
+import '../services/connectivity_service.dart';
 
 class RodMaePageFrame extends StatelessWidget {
   final Widget child;
@@ -147,50 +149,59 @@ class _RodMaeHeaderState extends State<RodMaeHeader> {
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        // Gold ring + avatar image or initial
-                        Container(
-                          width: 30,
-                          height: 30,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            gradient: _avatarUrl == null ? RodMaeColors.goldGradient : null,
-                            border: _avatarUrl != null ? Border.all(color: RodMaeColors.gold, width: 1.5) : null,
-                            boxShadow: [
-                              BoxShadow(
-                                color: RodMaeColors.gold.withValues(alpha: 0.45),
-                                blurRadius: 10,
-                                spreadRadius: 1,
-                              ),
-                            ],
-                          ),
-                          alignment: Alignment.center,
-                          child: _avatarUrl != null
-                              ? ClipOval(
-                                  child: Image.network(
-                                    _avatarUrl!,
-                                    width: 30,
-                                    height: 30,
-                                    fit: BoxFit.cover,
-                                    errorBuilder: (context, error, stackTrace) {
-                                      return Text(
-                                        active.initials,
-                                        style: GoogleFonts.inter(
-                                          color: RodMaeColors.navy,
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w900,
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                )
-                              : Text(
-                                  active.initials,
-                                  style: GoogleFonts.inter(
-                                    color: RodMaeColors.navy,
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w900,
-                                  ),
+                         // ── Avatar wrapped with partner presence badge ────
+                        PresenceAvatarBadge(
+                          partnerName: active == PartnerProfile.rodel
+                              ? 'Eurine'
+                              : 'Rodel',
+                          radius: 15,
+                          badgeSize: 10,
+                          child: Container(
+                            width: 30,
+                            height: 30,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              gradient: _avatarUrl == null ? RodMaeColors.goldGradient : null,
+                              border: _avatarUrl != null
+                                  ? Border.all(color: RodMaeColors.gold, width: 1.5)
+                                  : null,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: RodMaeColors.gold.withValues(alpha: 0.45),
+                                  blurRadius: 10,
+                                  spreadRadius: 1,
                                 ),
+                              ],
+                            ),
+                            alignment: Alignment.center,
+                            child: _avatarUrl != null
+                                ? ClipOval(
+                                    child: Image.network(
+                                      _avatarUrl!,
+                                      width: 30,
+                                      height: 30,
+                                      fit: BoxFit.cover,
+                                      errorBuilder: (context, error, stackTrace) {
+                                        return Text(
+                                          active.initials,
+                                          style: GoogleFonts.inter(
+                                            color: RodMaeColors.navy,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w900,
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  )
+                                : Text(
+                                    active.initials,
+                                    style: GoogleFonts.inter(
+                                      color: RodMaeColors.navy,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w900,
+                                    ),
+                                  ),
+                          ),
                         ),
                         const SizedBox(width: 7),
                         // Name column
@@ -236,17 +247,41 @@ class _RodMaeHeaderState extends State<RodMaeHeader> {
         ),
         
         const SizedBox(height: 10),
-        
-        // Row 2: Connection Status Chip & Theme Switch
+
+        // Row 2: Live partner presence + network status + theme toggle
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            _StatusChip(
-              label: AppRuntime.supabaseReady ? 'CONNECTED' : 'OFFLINE',
-              icon: AppRuntime.supabaseReady
-                  ? Icons.cloud_done_rounded
-                  : Icons.cloud_off_rounded,
+            // ── Left: connectivity-aware status chip ─────────────────────────
+            ValueListenableBuilder<bool>(
+              valueListenable: ConnectivityService.isOnline,
+              builder: (context, online, _) {
+                // When online, show live partner presence text
+                if (online && AppRuntime.supabaseReady) {
+                  return ValueListenableBuilder<PartnerProfile>(
+                    valueListenable: PartnerIdentity.active,
+                    builder: (context, active, _) {
+                      final partnerName = active == PartnerProfile.rodel
+                          ? 'Eurine'
+                          : 'Rodel';
+                      return PresenceIndicatorText(
+                        partnerName: partnerName,
+                        dotSize: 7,
+                      );
+                    },
+                  );
+                }
+                // Offline or Supabase not ready: show static chip
+                return _StatusChip(
+                  label: online ? 'CONNECTED' : 'UNABLE TO CONNECT',
+                  icon: online
+                      ? Icons.cloud_done_rounded
+                      : Icons.wifi_off_rounded,
+                  online: online,
+                );
+              },
             ),
+            // ── Right: theme toggle ──────────────────────────────────────────
             ValueListenableBuilder<ThemeMode>(
               valueListenable: RodMaeTheme.themeNotifier,
               builder: (context, currentMode, _) {
@@ -273,7 +308,6 @@ class _RodMaeHeaderState extends State<RodMaeHeader> {
                     child: Stack(
                       alignment: Alignment.center,
                       children: [
-                        // Sliding thumb indicator
                         AnimatedAlign(
                           duration: const Duration(milliseconds: 260),
                           curve: Curves.easeInOutCubic,
@@ -295,17 +329,14 @@ class _RodMaeHeaderState extends State<RodMaeHeader> {
                             ),
                           ),
                         ),
-                        // Icons Row
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceAround,
                           children: [
-                            // Sun Icon (Light Mode Active)
                             Icon(
                               Icons.light_mode_rounded,
                               size: 15,
                               color: !isCurrentlyDark ? RodMaeColors.navy : (isDark ? Colors.white30 : Colors.black38),
                             ),
-                            // Moon Icon (Dark Mode Active)
                             Icon(
                               Icons.dark_mode_rounded,
                               size: 15,
@@ -330,15 +361,18 @@ class _RodMaeHeaderState extends State<RodMaeHeader> {
 class _StatusChip extends StatelessWidget {
   final String label;
   final IconData icon;
+  final bool online;
 
   const _StatusChip({
     required this.label,
     required this.icon,
+    this.online = true,
   });
 
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final chipColor = online ? RodMaeColors.electricBlue : const Color(0xFFDC2626);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
       decoration: BoxDecoration(
@@ -346,19 +380,19 @@ class _StatusChip extends StatelessWidget {
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
           color: isDark 
-              ? RodMaeColors.sky.withValues(alpha: 0.16) 
+              ? chipColor.withValues(alpha: 0.22) 
               : Colors.black.withValues(alpha: 0.1),
         ),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, color: RodMaeColors.electricBlue, size: 14),
+          Icon(icon, color: chipColor, size: 14),
           const SizedBox(width: 5),
           Text(
             label,
             style: GoogleFonts.inter(
-              color: isDark ? RodMaeColors.sky : RodMaeColors.navy2,
+              color: isDark ? (online ? RodMaeColors.sky : const Color(0xFFFCA5A5)) : RodMaeColors.navy2,
               fontSize: 9,
               fontWeight: FontWeight.w800,
               letterSpacing: 0.6,

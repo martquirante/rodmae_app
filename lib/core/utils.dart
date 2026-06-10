@@ -39,6 +39,17 @@ final class Formatters {
     return '$hour:$minute $suffix';
   }
 
+  /// Returns a human-readable "Jun 9 • 4:23 PM" style stamp.
+  static String dateTime(DateTime dt) {
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    ];
+    final month = months[dt.month - 1];
+    final day = dt.day;
+    return '$month $day • ${time(dt)}';
+  }
+
   static double asDouble(dynamic value) {
     if (value is num) {
       return value.toDouble();

@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../core/theme.dart';
+import '../widgets/advanced_loading_effect.dart';
 import '../core/constants.dart';
 import '../core/utils.dart';
 import '../models/chat_message.dart';
@@ -27,23 +27,33 @@ class PrivateChatScreen extends StatefulWidget {
   State<PrivateChatScreen> createState() => _PrivateChatScreenState();
 }
 
-class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTickerProviderStateMixin {
+class _PrivateChatScreenState extends State<PrivateChatScreen>
+    with SingleTickerProviderStateMixin {
   int _tab = 0;
   final _chatController = TextEditingController();
   final _noteController = TextEditingController();
   final _pendingMessages = <ChatMessage>[];
   bool _sendingChat = false;
   bool _sendingNote = false;
+  bool _isRefreshingChat = false;
+  bool _isRefreshingNotes = false;
+  bool _isRefreshingSignals = false;
 
   // Custom animations for sender notes
   LoveTrigger? _activeTrigger;
   late final AnimationController _lottieController;
 
-
+  late final Stream<List<ChatMessage>> _chatStream;
+  late final Stream<List<SurpriseNote>> _notesStream;
+  late final Stream<List<LoveTriggerEvent>> _signalsStream;
 
   @override
   void initState() {
     super.initState();
+    _chatStream = SupabaseWeddingRepository.instance.watchChat();
+    _notesStream = SupabaseWeddingRepository.instance.watchNotes();
+    _signalsStream = SupabaseWeddingRepository.instance.watchLoveTriggers();
+
     _lottieController = AnimationController(vsync: this);
     _lottieController.addStatusListener((status) {
       if (status == AnimationStatus.completed && mounted) {
@@ -53,7 +63,8 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
     });
 
     AppNotificationNavigation.privateChatTabNotifier.value = _tab;
-    AppNotificationNavigation.privateChatTabNotifier.addListener(_onPrivateChatTabChanged);
+    AppNotificationNavigation.privateChatTabNotifier
+        .addListener(_onPrivateChatTabChanged);
   }
 
   void _onPrivateChatTabChanged() {
@@ -66,20 +77,54 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
 
   @override
   void dispose() {
-    AppNotificationNavigation.privateChatTabNotifier.removeListener(_onPrivateChatTabChanged);
+    AppNotificationNavigation.privateChatTabNotifier
+        .removeListener(_onPrivateChatTabChanged);
     _chatController.dispose();
     _noteController.dispose();
     _lottieController.dispose();
     super.dispose();
   }
 
+  // ── Pull-to-Refresh handlers ───────────────────────────────────────────────
 
+  Future<void> _refreshChat() async {
+    if (_isRefreshingChat) return;
+    setState(() => _isRefreshingChat = true);
+    try {
+      await SupabaseWeddingRepository.instance.fetchChat();
+    } catch (_) {}
+    if (mounted) {
+      setState(() => _isRefreshingChat = false);
+    }
+  }
+
+  Future<void> _refreshNotes() async {
+    if (_isRefreshingNotes) return;
+    setState(() => _isRefreshingNotes = true);
+    try {
+      await SupabaseWeddingRepository.instance.fetchNotes();
+    } catch (_) {}
+    if (mounted) {
+      setState(() => _isRefreshingNotes = false);
+    }
+  }
+
+  Future<void> _refreshSignals() async {
+    if (_isRefreshingSignals) return;
+    setState(() => _isRefreshingSignals = true);
+    try {
+      await SupabaseWeddingRepository.instance.fetchLoveTriggers();
+    } catch (_) {}
+    if (mounted) {
+      setState(() => _isRefreshingSignals = false);
+    }
+  }
+
+  // ── Message sending ────────────────────────────────────────────────────────
 
   Future<void> _sendMessage() async {
     final text = _chatController.text.trim();
-    if (text.isEmpty || _sendingChat) {
-      return;
-    }
+    if (text.isEmpty || _sendingChat) return;
     setState(() => _sendingChat = true);
     _chatController.clear();
 
@@ -88,6 +133,7 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
       sender: PartnerIdentity.active.value.label,
       message: text,
       createdAt: DateTime.now(),
+      status: MessageStatus.sent,
     );
 
     try {
@@ -97,21 +143,180 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
       }
     } catch (error) {
       setState(() => _pendingMessages.add(localMessage));
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Message saved locally (Offline).')),
-      );
-    } finally {
       if (mounted) {
-        setState(() => _sendingChat = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Message saved locally (Offline).')),
+        );
       }
+    } finally {
+      if (mounted) setState(() => _sendingChat = false);
     }
   }
 
+  /// Handles Image / Location / Love quick-action buttons.
+  Future<void> _onSpecialAction(MessageType type) async {
+    switch (type) {
+      case MessageType.image:
+        await _sendImageMessage();
+        break;
+      case MessageType.location:
+        await _sendLocationMessage();
+        break;
+      case MessageType.love:
+        await _sendLoveSignalFromChat();
+        break;
+      case MessageType.text:
+        break;
+    }
+  }
+
+  /// Picks an image and sends it as a chat message.
+  Future<void> _sendImageMessage() async {
+    // Show a bottom sheet asking the user to paste a URL or pick from gallery
+    if (!mounted) return;
+    final url = await _showImageUrlDialog();
+    if (url == null || url.isEmpty) return;
+
+    final msg = ChatMessage(
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      sender: PartnerIdentity.active.value.label,
+      message: '',
+      createdAt: DateTime.now(),
+      status: MessageStatus.sent,
+      messageType: MessageType.image,
+      imageUrl: url,
+    );
+    setState(() => _pendingMessages.add(msg));
+
+    try {
+      await SupabaseWeddingRepository.instance.sendRichMessage(msg);
+    } catch (_) {}
+  }
+
+  Future<String?> _showImageUrlDialog() async {
+    final controller = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: RodMaeColors.navy,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Text(
+          'Send Image',
+          style: GoogleFonts.playfairDisplay(color: Colors.white, fontSize: 18),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Paste an image URL to share with your spouse.',
+              style: GoogleFonts.inter(color: Colors.white60, fontSize: 12),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              style: GoogleFonts.inter(color: Colors.white, fontSize: 13),
+              decoration: InputDecoration(
+                hintText: 'https://example.com/photo.jpg',
+                hintStyle: GoogleFonts.inter(
+                    color: Colors.white30, fontSize: 12),
+                prefixIcon: const Icon(Icons.link_rounded,
+                    color: RodMaeColors.sky, size: 18),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text('Cancel',
+                style: GoogleFonts.inter(color: Colors.white54)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: RodMaeColors.electricBlue,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child:
+                Text('Send', style: GoogleFonts.inter(fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Sends current location as a chat message.
+  Future<void> _sendLocationMessage() async {
+    if (!mounted) return;
+    // Show a confirmation sheet before sending location
+    final confirmed = await showModalBottomSheet<bool>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => _LocationConfirmSheet(
+        onConfirm: () => Navigator.pop(ctx, true),
+        onCancel: () => Navigator.pop(ctx, false),
+      ),
+    );
+    if (confirmed != true) return;
+
+    // We'll use approximate location data via placeholder.
+    // In a full implementation, use geolocator package.
+    final now = DateTime.now();
+    const placeholderAddr = 'Sharing current location...';
+    final msg = ChatMessage(
+      id: now.microsecondsSinceEpoch.toString(),
+      sender: PartnerIdentity.active.value.label,
+      message: placeholderAddr,
+      createdAt: now,
+      status: MessageStatus.sent,
+      messageType: MessageType.location,
+      locationData: '14.5995,120.9842,$placeholderAddr',
+    );
+    setState(() => _pendingMessages.add(msg));
+
+    try {
+      await SupabaseWeddingRepository.instance.sendRichMessage(msg);
+    } catch (_) {}
+  }
+
+  /// Sends a love signal from the chat composer (not the home dashboard).
+  Future<void> _sendLoveSignalFromChat() async {
+    if (!mounted) return;
+    final msg = ChatMessage(
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      sender: PartnerIdentity.active.value.label,
+      message: 'Sending love to you 💕',
+      createdAt: DateTime.now(),
+      status: MessageStatus.sent,
+      messageType: MessageType.love,
+    );
+    setState(() => _pendingMessages.add(msg));
+    try {
+      await SupabaseWeddingRepository.instance.sendRichMessage(msg);
+    } catch (_) {}
+
+    // Trigger the animated love overlay
+    setState(() {
+      _activeTrigger = const LoveTrigger(
+        title: 'I Love You',
+        subtitle: 'Sending love to your spouse!',
+        icon: Icons.favorite_rounded,
+        color: Color(0xFFFF5E8D),
+        animationAsset: 'assets/animations/hearts_shower.json',
+        overlayTitle: '❤️ Love Signal',
+      );
+    });
+  }
+
+  // ── Notes ──────────────────────────────────────────────────────────────────
+
   Future<void> _sendNote() async {
     final text = _noteController.text.trim();
-    if (text.isEmpty || _sendingNote) {
-      return;
-    }
+    if (text.isEmpty || _sendingNote) return;
     setState(() => _sendingNote = true);
     _noteController.clear();
 
@@ -127,16 +332,16 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
         const SnackBar(content: Text('Failed to sync note, saved locally.')),
       );
     } finally {
-      if (mounted) {
-        setState(() => _sendingNote = false);
-      }
+      if (mounted) setState(() => _sendingNote = false);
     }
   }
+
+  // ── Build ──────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    
+
     return Stack(
       children: [
         RodMaePageFrame(
@@ -153,7 +358,8 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
                   ],
                   selected: _tab,
                   onSelected: (value) {
-                    AppNotificationNavigation.privateChatTabNotifier.value = value;
+                    AppNotificationNavigation.privateChatTabNotifier.value =
+                        value;
                   },
                 ),
               ),
@@ -184,15 +390,34 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
     );
   }
 
+  // ── Chat tab ───────────────────────────────────────────────────────────────
+
   Widget _buildChatTab(bool isDark) {
+    final myLabel = PartnerIdentity.active.value.label.toLowerCase();
+
     return Column(
       children: [
         Expanded(
           child: StreamBuilder<List<ChatMessage>>(
-            stream: SupabaseWeddingRepository.instance.watchChat(),
+            stream: _chatStream,
             builder: (context, snapshot) {
               if (snapshot.connectionState == ConnectionState.waiting) {
-                return const Center(child: CircularProgressIndicator());
+                return AdvancedLoadingEffect(
+                  isLoading: true,
+                  placeholder: ListView.separated(
+                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                    itemCount: 6,
+                    separatorBuilder: (_, index) => const SizedBox(height: 12),
+                    itemBuilder: (_, index) => Container(
+                      height: 64,
+                      decoration: BoxDecoration(
+                        color: Colors.white12,
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                    ),
+                  ),
+                  child: const SizedBox.expand(),
+                );
               }
 
               if (snapshot.hasError) {
@@ -234,7 +459,9 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
                         'No chat history yet.\nSend a message to start conversing!',
                         textAlign: TextAlign.center,
                         style: GoogleFonts.inter(
-                          color: isDark ? Colors.white54 : RodMaeColors.lightTextSoft,
+                          color: isDark
+                              ? Colors.white54
+                              : RodMaeColors.lightTextSoft,
                           fontSize: 13,
                           fontWeight: FontWeight.w700,
                         ),
@@ -244,13 +471,38 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
                 );
               }
 
-              return ListView.builder(
-                physics: const BouncingScrollPhysics(),
-                padding: const EdgeInsets.fromLTRB(18, 4, 18, 16),
-                itemCount: messages.length,
-                itemBuilder: (context, index) {
-                  return ChatBubble(message: messages[index]);
-                },
+              // Find the index of the latest message sent by the local user
+              // for the read receipt indicator
+              int latestMineIndex = -1;
+              for (int i = messages.length - 1; i >= 0; i--) {
+                if (messages[i].sender.toLowerCase() == myLabel) {
+                  latestMineIndex = i;
+                  break;
+                }
+              }
+
+              return RefreshIndicator(
+                color: Colors.transparent,
+                backgroundColor: Colors.transparent,
+                displacement: 140.0,
+                onRefresh: _refreshChat,
+                child: AdvancedLoadingEffect(
+                  isLoading: _isRefreshingChat,
+                  child: ListView.builder(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: const EdgeInsets.fromLTRB(18, 4, 18, 16),
+                    itemCount: messages.length,
+                    itemBuilder: (context, index) {
+                      final msg = messages[index];
+                      final isLatestFromMe = index == latestMineIndex &&
+                          msg.sender.toLowerCase() == myLabel;
+                      return ChatBubble(
+                        message: msg,
+                        isLatestFromMe: isLatestFromMe,
+                      );
+                    },
+                  ),
+                ),
               );
             },
           ),
@@ -259,10 +511,13 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
           controller: _chatController,
           sending: _sendingChat,
           onSend: _sendMessage,
+          onSpecialAction: _onSpecialAction,
         ),
       ],
     );
   }
+
+  // ── Notes tab ──────────────────────────────────────────────────────────────
 
   Widget _buildNotesTab(bool isDark) {
     return Column(
@@ -278,7 +533,8 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
               children: [
                 Row(
                   children: [
-                    const Icon(Icons.sticky_note_2_rounded, color: RodMaeColors.gold, size: 20),
+                    const Icon(Icons.sticky_note_2_rounded,
+                        color: RodMaeColors.gold, size: 20),
                     const SizedBox(width: 8),
                     Text(
                       'WRITE A SWEET NOTE',
@@ -312,18 +568,22 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
                     ),
                     filled: true,
                     fillColor: Colors.black.withValues(alpha: 0.15),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(14),
-                      borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
+                      borderSide: BorderSide(
+                          color: Colors.white.withValues(alpha: 0.1)),
                     ),
                     enabledBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(14),
-                      borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
+                      borderSide: BorderSide(
+                          color: Colors.white.withValues(alpha: 0.1)),
                     ),
                     focusedBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(14),
-                      borderSide: const BorderSide(color: RodMaeColors.gold),
+                      borderSide:
+                          const BorderSide(color: RodMaeColors.gold),
                     ),
                   ),
                 ),
@@ -345,10 +605,25 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
         // History List
         Expanded(
           child: StreamBuilder<List<SurpriseNote>>(
-            stream: SupabaseWeddingRepository.instance.watchNotes(),
+            stream: _notesStream,
             builder: (context, snapshot) {
               if (snapshot.connectionState == ConnectionState.waiting) {
-                return const Center(child: CircularProgressIndicator());
+                return AdvancedLoadingEffect(
+                  isLoading: true,
+                  placeholder: ListView.separated(
+                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+                    itemCount: 4,
+                    separatorBuilder: (_, index) => const SizedBox(height: 12),
+                    itemBuilder: (_, index) => Container(
+                      height: 96,
+                      decoration: BoxDecoration(
+                        color: Colors.white12,
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                    ),
+                  ),
+                  child: const SizedBox.expand(),
+                );
               }
 
               final notes = snapshot.data ?? <SurpriseNote>[];
@@ -367,77 +642,98 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
                 );
               }
 
-              return ListView.builder(
-                physics: const BouncingScrollPhysics(),
-                padding: const EdgeInsets.fromLTRB(18, 8, 18, 100),
-                itemCount: notes.length,
-                itemBuilder: (context, index) {
-                  final note = notes[index];
-                  final isMe = note.sender.toLowerCase() == PartnerIdentity.active.value.label.toLowerCase();
-                  
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: GlassCard(
-                      borderColor: isMe 
-                          ? RodMaeColors.sky.withValues(alpha: 0.18) 
-                          : RodMaeColors.gold.withValues(alpha: 0.18),
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              Row(
-                                children: [
-                                  CircleAvatar(
-                                    radius: 10,
-                                    backgroundColor: isMe ? RodMaeColors.sky : RodMaeColors.gold,
-                                    child: Text(
-                                      note.sender[0],
-                                      style: GoogleFonts.inter(
-                                        color: RodMaeColors.navy,
-                                        fontSize: 9,
-                                        fontWeight: FontWeight.w900,
+              return RefreshIndicator(
+                color: Colors.transparent,
+                backgroundColor: Colors.transparent,
+                displacement: 140.0,
+                onRefresh: _refreshNotes,
+                child: AdvancedLoadingEffect(
+                  isLoading: _isRefreshingNotes,
+                  child: ListView.builder(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: const EdgeInsets.fromLTRB(18, 8, 18, 100),
+                  itemCount: notes.length,
+                  itemBuilder: (context, index) {
+                    final note = notes[index];
+                    final isMe = note.sender.toLowerCase() ==
+                        PartnerIdentity.active.value.label.toLowerCase();
+
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: GlassCard(
+                        borderColor: isMe
+                            ? RodMaeColors.sky.withValues(alpha: 0.18)
+                            : RodMaeColors.gold.withValues(alpha: 0.18),
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              mainAxisAlignment:
+                                  MainAxisAlignment.spaceBetween,
+                              children: [
+                                // Sender
+                                Row(
+                                  children: [
+                                    CircleAvatar(
+                                      radius: 10,
+                                      backgroundColor: isMe
+                                          ? RodMaeColors.sky
+                                          : RodMaeColors.gold,
+                                      child: Text(
+                                        note.sender[0],
+                                        style: GoogleFonts.inter(
+                                          color: RodMaeColors.navy,
+                                          fontSize: 9,
+                                          fontWeight: FontWeight.w900,
+                                        ),
                                       ),
                                     ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Text(
-                                    note.sender,
-                                    style: GoogleFonts.inter(
-                                      color: isMe ? RodMaeColors.sky : RodMaeColors.gold,
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.w800,
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      note.sender,
+                                      style: GoogleFonts.inter(
+                                        color: isMe
+                                            ? RodMaeColors.sky
+                                            : RodMaeColors.gold,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w800,
+                                      ),
                                     ),
-                                  ),
-                                ],
-                              ),
-                              Text(
-                                Formatters.date(note.createdAt),
-                                style: GoogleFonts.robotoMono(
-                                  color: isDark ? Colors.white30 : Colors.black38,
-                                  fontSize: 9,
+                                  ],
                                 ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 10),
-                          Text(
-                            '"${note.content}"',
-                            style: GoogleFonts.playfairDisplay(
-                              color: isDark ? Colors.white : RodMaeColors.lightText,
-                              fontSize: 14,
-                              fontStyle: FontStyle.italic,
-                              height: 1.32,
+                                // ── Timestamp: date + time ───────────────────
+                                Text(
+                                  Formatters.dateTime(note.createdAt),
+                                  style: GoogleFonts.robotoMono(
+                                    color: isDark
+                                        ? Colors.white30
+                                        : Colors.black38,
+                                    fontSize: 9,
+                                  ),
+                                ),
+                              ],
                             ),
-                          ),
-                        ],
+                            const SizedBox(height: 10),
+                            Text(
+                              '"${note.content}"',
+                              style: GoogleFonts.playfairDisplay(
+                                color: isDark
+                                    ? Colors.white
+                                    : RodMaeColors.lightText,
+                                fontSize: 14,
+                                fontStyle: FontStyle.italic,
+                                height: 1.32,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
-                  );
-                },
-              );
+                    );
+                  },
+                ), // close ListView.builder
+                ), // close AdvancedLoadingEffect
+              ); // close RefreshIndicator
             },
           ),
         ),
@@ -445,12 +741,29 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
     );
   }
 
+  // ── Signals tab ─────────────────────────────────────────────────────────────
+
   Widget _buildSignalsTab(bool isDark) {
     return StreamBuilder<List<LoveTriggerEvent>>(
-      stream: SupabaseWeddingRepository.instance.watchLoveTriggers(),
+      stream: _signalsStream,
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
+          return AdvancedLoadingEffect(
+            isLoading: true,
+            placeholder: ListView.separated(
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+              itemCount: 5,
+              separatorBuilder: (_, index) => const SizedBox(height: 12),
+              itemBuilder: (_, index) => Container(
+                height: 64,
+                decoration: BoxDecoration(
+                  color: Colors.white12,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+              ),
+            ),
+            child: const SizedBox.expand(),
+          );
         }
 
         final signals = snapshot.data ?? <LoveTriggerEvent>[];
@@ -469,14 +782,22 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
           );
         }
 
-        return ListView.builder(
-          physics: const BouncingScrollPhysics(),
-          padding: const EdgeInsets.fromLTRB(18, 8, 18, 100),
-          itemCount: signals.length,
-          itemBuilder: (context, index) {
-            final sig = signals[index];
-            final isMe = sig.sender.toLowerCase() == PartnerIdentity.active.value.label.toLowerCase();
-            
+        return RefreshIndicator(
+          color: Colors.transparent,
+          backgroundColor: Colors.transparent,
+          displacement: 140.0,
+          onRefresh: _refreshSignals,
+          child: AdvancedLoadingEffect(
+            isLoading: _isRefreshingSignals,
+            child: ListView.builder(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(18, 8, 18, 100),
+            itemCount: signals.length,
+            itemBuilder: (context, index) {
+              final sig = signals[index];
+              final isMe = sig.sender.toLowerCase() ==
+                  PartnerIdentity.active.value.label.toLowerCase();
+
             IconData icon = Icons.favorite_rounded;
             Color color = RodMaeColors.rose;
             String text = '';
@@ -485,39 +806,51 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
               case 'Miss You':
                 icon = Icons.favorite_rounded;
                 color = RodMaeColors.rose;
-                text = isMe ? 'You sent a Hearts Shower' : '${sig.sender} sent a Hearts Shower';
+                text = isMe
+                    ? 'You sent a Hearts Shower'
+                    : '${sig.sender} sent a Hearts Shower';
                 break;
               case 'I Love You':
                 icon = Icons.favorite_rounded;
                 color = RodMaeColors.rose;
-                text = isMe ? 'You declared: "I Love You!" ❤️' : '${sig.sender} declared: "I Love You!" ❤️';
+                text = isMe
+                    ? 'You declared: "I Love You!" ❤️'
+                    : '${sig.sender} declared: "I Love You!" ❤️';
                 break;
               case 'Heading Home':
                 icon = Icons.navigation_rounded;
                 color = RodMaeColors.mint;
-                text = isMe ? 'You shared your route home' : '${sig.sender} shared route home';
+                text = isMe
+                    ? 'You shared your route home'
+                    : '${sig.sender} shared route home';
                 break;
               case 'Flying Kiss':
                 icon = Icons.favorite_border_rounded;
                 color = RodMaeColors.gold;
-                text = isMe ? 'You blew a Flying Kiss' : '${sig.sender} blew a Flying Kiss';
+                text = isMe
+                    ? 'You blew a Flying Kiss'
+                    : '${sig.sender} blew a Flying Kiss';
                 break;
               case 'Surprise Note':
                 icon = Icons.sticky_note_2_rounded;
                 color = RodMaeColors.electricBlue;
-                text = isMe ? 'You sent a Sweet Note' : '${sig.sender} sent a Sweet Note';
+                text = isMe
+                    ? 'You sent a Sweet Note'
+                    : '${sig.sender} sent a Sweet Note';
                 break;
               default:
                 icon = Icons.favorite_rounded;
                 color = RodMaeColors.rose;
-                text = '${sig.sender} triggered love signal: ${sig.triggerType}';
+                text =
+                    '${sig.sender} triggered love signal: ${sig.triggerType}';
             }
 
             return Padding(
               padding: const EdgeInsets.only(bottom: 10),
               child: GlassCard(
                 borderColor: color.withValues(alpha: 0.18),
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                 child: Row(
                   children: [
                     Container(
@@ -537,14 +870,17 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
                           Text(
                             text,
                             style: GoogleFonts.inter(
-                              color: isDark ? Colors.white : RodMaeColors.lightText,
+                              color: isDark
+                                  ? Colors.white
+                                  : RodMaeColors.lightText,
                               fontSize: 13,
                               fontWeight: FontWeight.w800,
                             ),
                           ),
                           const SizedBox(height: 3),
+                          // ── Timestamp: now shows date + time ─────────────
                           Text(
-                            Formatters.date(sig.createdAt),
+                            Formatters.dateTime(sig.createdAt),
                             style: GoogleFonts.robotoMono(
                               color: isDark ? Colors.white30 : Colors.black38,
                               fontSize: 9,
@@ -558,8 +894,113 @@ class _PrivateChatScreenState extends State<PrivateChatScreen> with SingleTicker
               ),
             );
           },
-        );
+          ),  // close ListView.builder
+          ),  // close AdvancedLoadingEffect
+        );    // close RefreshIndicator
       },
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Location confirm bottom sheet
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _LocationConfirmSheet extends StatelessWidget {
+  final VoidCallback onConfirm;
+  final VoidCallback onCancel;
+
+  const _LocationConfirmSheet({
+    required this.onConfirm,
+    required this.onCancel,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: RodMaeColors.navy,
+        borderRadius: BorderRadius.circular(28),
+        border: Border.all(
+          color: RodMaeColors.mint.withValues(alpha: 0.25),
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 56,
+            height: 56,
+            decoration: BoxDecoration(
+              color: RodMaeColors.mint.withValues(alpha: 0.15),
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: RodMaeColors.mint.withValues(alpha: 0.4),
+              ),
+            ),
+            child: const Icon(Icons.location_on_rounded,
+                color: RodMaeColors.mint, size: 28),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            'Share Your Location?',
+            style: GoogleFonts.playfairDisplay(
+              color: Colors.white,
+              fontSize: 18,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Your current location will be sent to your spouse in the chat. They can tap it to open in Maps.',
+            textAlign: TextAlign.center,
+            style: GoogleFonts.inter(
+              color: Colors.white60,
+              fontSize: 12,
+              height: 1.5,
+            ),
+          ),
+          const SizedBox(height: 20),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: onCancel,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white54,
+                    side: const BorderSide(color: Colors.white24),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
+                  child: Text('Cancel',
+                      style: GoogleFonts.inter(fontWeight: FontWeight.w700)),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: onConfirm,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: RodMaeColors.mint,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
+                  child: Text('Share',
+                      style: GoogleFonts.inter(fontWeight: FontWeight.w800)),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+        ],
+      ),
     );
   }
 }
