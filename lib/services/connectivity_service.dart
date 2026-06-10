@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'supabase_service.dart';
+import 'notification_service.dart';
 
 // ═════════════════════════════════════════════════════════════════════════════
 // CONNECTIVITY SERVICE
@@ -97,6 +98,7 @@ final class ConnectivityService {
         SupabaseWeddingRepository.instance.fetchLoveTriggers(),
         SupabaseWeddingRepository.instance.fetchChat(),
         SupabaseWeddingRepository.instance.fetchFinances(),
+        NotificationService.markAllPendingMessagesAsDelivered(),
       ]);
       debugPrint('[ConnectivityService] Background sync complete.');
     } catch (e) {

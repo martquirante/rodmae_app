@@ -66,6 +66,15 @@ serve(async (req: Request) => {
     type = "general";
   }
 
+  // Support custom title and body overrides from direct client invocation
+  const customNotification = (payload as any).notification;
+  if (customNotification && customNotification.title) {
+    title = String(customNotification.title);
+  }
+  if (customNotification && customNotification.body) {
+    body = String(customNotification.body);
+  }
+
   // Truncate body if too long
   if (body.length > 160) {
     body = body.slice(0, 160) + "…";
@@ -94,16 +103,24 @@ serve(async (req: Request) => {
       throw new Error("Failed to retrieve access token from GoogleAuth");
     }
 
+    let targetTopic = record["topic"] ? String(record["topic"]) : null;
+    if (!targetTopic) {
+      const senderVal = String(record["sender"] ?? sender).trim().toLowerCase();
+      const spouseLabel = senderVal.includes("rodel") ? "Eurine" : "Rodel";
+      targetTopic = `couple-rodel-marymae-2026-${spouseLabel}`;
+    }
+
     // 3. Build FCM HTTP v1 request payload
     const fcmEndpoint = `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`;
     const fcmPayload = {
       message: {
-        topic: String(record["topic"] ?? "couple-rodel-marymae-2026"),
+        topic: targetTopic,
         notification: {
           title,
           body,
         },
         data: {
+          id: String(record["id"] ?? ""),
           type,
           title,
           body,
@@ -115,9 +132,9 @@ serve(async (req: Request) => {
             : "",
         },
         android: {
-          priority: "HIGH",
+          priority: "high",
           notification: {
-            channel_id: "rodmae_love_channel",
+            channel_id: "rodmae_high_priority_channel_v2",
             sound: "default",
             notification_priority: "PRIORITY_MAX",
             default_vibrate_timings: true,

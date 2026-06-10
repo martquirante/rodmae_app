@@ -1,10 +1,14 @@
 import 'dart:io';
+import 'dart:ui';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:any_link_preview/any_link_preview.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../core/theme.dart';
 import '../core/utils.dart';
 import '../models/chat_message.dart';
+import '../services/auth_service.dart';
 import 'advanced_loading_effect.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -18,31 +22,34 @@ class ChatBubble extends StatelessWidget {
   /// Only the latest message shows the receipt indicator (like Messenger).
   final bool isLatestFromMe;
 
+  /// Partner's avatar URL for the 'seen' read receipt mini avatar.
+  final String? partnerAvatarUrl;
+
   const ChatBubble({
     required this.message,
     this.isLatestFromMe = false,
+    this.partnerAvatarUrl,
     super.key,
   });
 
   @override
   Widget build(BuildContext context) {
     final sender = message.sender.toLowerCase();
-    final isRodel = sender.contains('rodel');
-    final isMary  = sender.contains('mary') || sender.contains('mae') ||
-                    sender.contains('eurine');
-    final align   = isRodel ? Alignment.centerRight : Alignment.centerLeft;
+    final myLabel = PartnerIdentity.active.value.label.toLowerCase();
+    final isMe = sender == myLabel;
+    final align   = isMe ? Alignment.centerRight : Alignment.centerLeft;
     final isDark  = Theme.of(context).brightness == Brightness.dark;
 
     final bubbleColor = message.assistant
         ? RodMaeColors.violet
-        : isRodel
+        : isMe
             ? RodMaeColors.sapphire
             : (isDark ? RodMaeColors.charcoal : const Color(0xFFE2E8F0));
 
     final textColor =
-        (isMary && !isDark && !message.assistant) ? Colors.black87 : Colors.white;
+        (!isMe && !isDark && !message.assistant) ? Colors.black87 : Colors.white;
     final timeColor =
-        (isMary && !isDark && !message.assistant) ? Colors.black38 : Colors.white60;
+        (!isMe && !isDark && !message.assistant) ? Colors.black38 : Colors.white60;
 
     final maxWidth = MediaQuery.sizeOf(context).width * 0.76;
 
@@ -53,8 +60,9 @@ class ChatBubble extends StatelessWidget {
         child: Padding(
           padding: const EdgeInsets.only(bottom: 12),
           child: Column(
+            mainAxisSize: MainAxisSize.min,
             crossAxisAlignment:
-                isRodel ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
             children: [
               // ── Sender label ─────────────────────────────────────────────
               Padding(
@@ -79,7 +87,7 @@ class ChatBubble extends StatelessWidget {
                 bubbleColor: bubbleColor,
                 textColor: textColor,
                 timeColor: timeColor,
-                isRodel: isRodel,
+                isMe: isMe,
               ),
 
               // ── Read receipt (only on latest message from *this* user) ────
@@ -87,8 +95,8 @@ class ChatBubble extends StatelessWidget {
                 const SizedBox(height: 3),
                 _ReadReceiptIndicator(
                   status: message.status,
-                  partnerInitial:
-                      isRodel ? 'E' : 'R', // opposite partner initial
+                  partnerInitial: PartnerIdentity.active.value == PartnerProfile.rodel ? 'E' : 'R',
+                  partnerAvatarUrl: partnerAvatarUrl,
                   isDark: isDark,
                 ),
               ],
@@ -105,7 +113,7 @@ class ChatBubble extends StatelessWidget {
     required Color bubbleColor,
     required Color textColor,
     required Color timeColor,
-    required bool isRodel,
+    required bool isMe,
   }) {
     switch (message.messageType) {
       case MessageType.image:
@@ -113,20 +121,20 @@ class ChatBubble extends StatelessWidget {
           message: message,
           bubbleColor: bubbleColor,
           timeColor: timeColor,
-          isRodel: isRodel,
+          isMe: isMe,
           isDark: isDark,
         );
       case MessageType.location:
         return _LocationBubble(
           message: message,
-          isRodel: isRodel,
+          isMe: isMe,
           isDark: isDark,
         );
       case MessageType.love:
         return _LoveBubble(
           message: message,
           timeColor: timeColor,
-          isRodel: isRodel,
+          isMe: isMe,
         );
       case MessageType.text:
         return _TextBubble(
@@ -134,14 +142,47 @@ class ChatBubble extends StatelessWidget {
           bubbleColor: bubbleColor,
           textColor: textColor,
           timeColor: timeColor,
-          isRodel: isRodel,
+          isMe: isMe,
         );
     }
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Text bubble
+// URL detection helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool _containsUrl(String text) {
+  final uri = Uri.tryParse(text.trim());
+  if (uri != null && (uri.scheme == 'http' || uri.scheme == 'https') && uri.host.isNotEmpty) {
+    return true;
+  }
+  // Also handle inline URLs in longer text
+  final urlRegex = RegExp(
+    r'https?://[^\s/$.?#].[^\s]*',
+    caseSensitive: false,
+  );
+  return urlRegex.hasMatch(text);
+}
+
+String? _extractFirstUrl(String text) {
+  // Whole message is a URL
+  final trimmed = text.trim();
+  final uri = Uri.tryParse(trimmed);
+  if (uri != null && (uri.scheme == 'http' || uri.scheme == 'https') && uri.host.isNotEmpty) {
+    return trimmed;
+  }
+  // URL embedded in text
+  final urlRegex = RegExp(
+    r'https?://[^\s/$.?#].[^\s]*',
+    caseSensitive: false,
+  );
+  final match = urlRegex.firstMatch(text);
+  return match?.group(0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Text bubble — with automatic URL / link preview
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _TextBubble extends StatelessWidget {
@@ -149,18 +190,24 @@ class _TextBubble extends StatelessWidget {
   final Color bubbleColor;
   final Color textColor;
   final Color timeColor;
-  final bool isRodel;
+  final bool isMe;
 
   const _TextBubble({
     required this.message,
     required this.bubbleColor,
     required this.textColor,
     required this.timeColor,
-    required this.isRodel,
+    required this.isMe,
   });
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final hasUrl = _containsUrl(message.message);
+    final extractedUrl = hasUrl ? _extractFirstUrl(message.message) : null;
+    final isWholeMessageUrl = extractedUrl != null &&
+        message.message.trim() == extractedUrl;
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 13),
       decoration: BoxDecoration(
@@ -168,27 +215,37 @@ class _TextBubble extends StatelessWidget {
         borderRadius: BorderRadius.only(
           topLeft: const Radius.circular(20),
           topRight: const Radius.circular(20),
-          bottomLeft: Radius.circular(isRodel ? 20 : 4),
-          bottomRight: Radius.circular(isRodel ? 4 : 20),
+          bottomLeft: Radius.circular(isMe ? 20 : 4),
+          bottomRight: Radius.circular(isMe ? 4 : 20),
         ),
         border: Border.all(
           color: Colors.white.withValues(
-            alpha: Theme.of(context).brightness == Brightness.dark ? 0.06 : 0.2,
+            alpha: isDark ? 0.06 : 0.2,
           ),
         ),
       ),
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            message.message,
-            style: GoogleFonts.inter(
-              color: textColor,
-              fontSize: 13,
-              height: 1.45,
-              fontWeight: FontWeight.w500,
+          // Show full message text only if it's not purely a URL
+          if (!isWholeMessageUrl)
+            Text(
+              message.message,
+              style: GoogleFonts.inter(
+                color: textColor,
+                fontSize: 13,
+                height: 1.45,
+                fontWeight: FontWeight.w500,
+              ),
             ),
-          ),
+
+          // ── Rich Link Preview ─────────────────────────────────────────
+          if (extractedUrl != null) ...[
+            if (!isWholeMessageUrl) const SizedBox(height: 10),
+            _LinkPreviewCard(url: extractedUrl, isDark: isDark),
+          ],
+
           const SizedBox(height: 6),
           Align(
             alignment: Alignment.centerRight,
@@ -208,21 +265,119 @@ class _TextBubble extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Image bubble
+// Link Preview Card — AnyLinkPreview wrapper
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _LinkPreviewCard extends StatelessWidget {
+  final String url;
+  final bool isDark;
+
+  const _LinkPreviewCard({required this.url, required this.isDark});
+
+  Future<void> _launchUrl() async {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return;
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: _launchUrl,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: AnyLinkPreview(
+          link: url,
+          displayDirection: UIDirection.uiDirectionVertical,
+          showMultimedia: true,
+          bodyMaxLines: 2,
+          bodyTextOverflow: TextOverflow.ellipsis,
+          titleStyle: GoogleFonts.inter(
+            color: isDark ? Colors.white : Colors.black87,
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+          ),
+          bodyStyle: GoogleFonts.inter(
+            color: isDark ? Colors.white60 : Colors.black54,
+            fontSize: 11,
+          ),
+          backgroundColor: isDark
+              ? Colors.white.withValues(alpha: 0.08)
+              : Colors.black.withValues(alpha: 0.06),
+          borderRadius: 12,
+          removeElevation: true,
+          errorWidget: GestureDetector(
+            onTap: _launchUrl,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: isDark
+                    ? Colors.white.withValues(alpha: 0.08)
+                    : Colors.black.withValues(alpha: 0.06),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: isDark
+                      ? Colors.white.withValues(alpha: 0.12)
+                      : Colors.black.withValues(alpha: 0.12),
+                ),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.link_rounded,
+                    size: 16,
+                    color: isDark ? Colors.white54 : Colors.black45,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      url,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.inter(
+                        color: RodMaeColors.sky,
+                        fontSize: 11,
+                        decoration: TextDecoration.underline,
+                        decorationColor: RodMaeColors.sky,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Icon(
+                    Icons.open_in_new_rounded,
+                    size: 13,
+                    color: isDark ? Colors.white38 : Colors.black38,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          cache: const Duration(hours: 24),
+          previewHeight: 160,
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Image bubble — CachedNetworkImage with shimmer loading
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _ImageBubble extends StatelessWidget {
   final ChatMessage message;
   final Color bubbleColor;
   final Color timeColor;
-  final bool isRodel;
+  final bool isMe;
   final bool isDark;
 
   const _ImageBubble({
     required this.message,
     required this.bubbleColor,
     required this.timeColor,
-    required this.isRodel,
+    required this.isMe,
     required this.isDark,
   });
 
@@ -237,8 +392,8 @@ class _ImageBubble extends StatelessWidget {
         borderRadius: BorderRadius.only(
           topLeft: const Radius.circular(20),
           topRight: const Radius.circular(20),
-          bottomLeft: Radius.circular(isRodel ? 20 : 4),
-          bottomRight: Radius.circular(isRodel ? 4 : 20),
+          bottomLeft: Radius.circular(isMe ? 20 : 4),
+          bottomRight: Radius.circular(isMe ? 4 : 20),
         ),
         border: Border.all(
           color: Colors.white.withValues(alpha: isDark ? 0.06 : 0.2),
@@ -246,6 +401,7 @@ class _ImageBubble extends StatelessWidget {
       ),
       clipBehavior: Clip.antiAlias,
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           GestureDetector(
@@ -261,29 +417,15 @@ class _ImageBubble extends StatelessWidget {
                         fit: BoxFit.cover,
                         errorBuilder: (ctx, e, s) => const _ImageErrorWidget(),
                       )
-                    : Image.network(
-                        url,
+                    : CachedNetworkImage(
+                        imageUrl: url,
                         fit: BoxFit.cover,
-                        loadingBuilder: (context, child, progress) {
-                          if (progress == null) return child;
-                          return AdvancedLoadingEffect(
-                            isLoading: true,
-                            placeholder: Container(
-                              width: 220,
-                              height: 180,
-                              decoration: BoxDecoration(
-                                color: Colors.white.withValues(alpha: 0.08),
-                                borderRadius: BorderRadius.circular(16),
-                              ),
-                            ),
-                            child: Container(
-                              width: 220,
-                              height: 180,
-                              color: Colors.transparent,
-                            ),
-                          );
-                        },
-                        errorBuilder: (ctx, err, stk) => const _ImageErrorWidget(),
+                        width: 220,
+                        height: 180,
+                        placeholder: (context, url) =>
+                            const _ImageShimmerWidget(),
+                        errorWidget: (context, url, error) =>
+                            const _ImageErrorWidget(),
                       ),
               ),
             ),
@@ -328,6 +470,64 @@ class _ImageBubble extends StatelessWidget {
   }
 }
 
+class _ImageShimmerWidget extends StatefulWidget {
+  const _ImageShimmerWidget();
+
+  @override
+  State<_ImageShimmerWidget> createState() => _ImageShimmerWidgetState();
+}
+
+class _ImageShimmerWidgetState extends State<_ImageShimmerWidget>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+  late final Animation<double> _anim;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat();
+    _anim = Tween<double>(begin: -1.5, end: 1.5).animate(
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _anim,
+      builder: (context, child) {
+        return Container(
+          width: 220,
+          height: 180,
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment(_anim.value - 1, 0),
+              end: Alignment(_anim.value + 1, 0),
+              colors: const [
+                Color(0xFF1A2540),
+                Color(0xFF243060),
+                Color(0xFF1A2540),
+              ],
+            ),
+          ),
+          child: const Center(
+            child: Icon(Icons.image_rounded, color: Colors.white24, size: 36),
+          ),
+        );
+      },
+    );
+  }
+}
+
 class _ImageErrorWidget extends StatelessWidget {
   const _ImageErrorWidget();
   @override
@@ -336,6 +536,7 @@ class _ImageErrorWidget extends StatelessWidget {
         height: 180,
         color: Colors.black26,
         child: const Column(
+          mainAxisSize: MainAxisSize.min,
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Icon(Icons.broken_image_rounded, color: Colors.white38, size: 40),
@@ -365,7 +566,17 @@ class _FullscreenImage extends StatelessWidget {
         child: InteractiveViewer(
           child: isLocal
               ? Image.file(File(url))
-              : Image.network(url),
+              : CachedNetworkImage(
+                  imageUrl: url,
+                  placeholder: (ctx, url) => const Center(
+                    child: CircularProgressIndicator(color: Colors.white30),
+                  ),
+                  errorWidget: (ctx, url, err) => const Icon(
+                    Icons.broken_image_rounded,
+                    color: Colors.white38,
+                    size: 48,
+                  ),
+                ),
         ),
       ),
     );
@@ -373,17 +584,17 @@ class _FullscreenImage extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Location bubble — shows a styled map-preview card like Messenger
+// Location bubble — static map thumbnail + address + navigates to map
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _LocationBubble extends StatelessWidget {
   final ChatMessage message;
-  final bool isRodel;
+  final bool isMe;
   final bool isDark;
 
   const _LocationBubble({
     required this.message,
-    required this.isRodel,
+    required this.isMe,
     required this.isDark,
   });
 
@@ -405,8 +616,16 @@ class _LocationBubble extends StatelessWidget {
     return GestureDetector(
       onTap: () {
         if (hasCoords) {
-          // hasCoords guarantees lat/lng are non-null via type promotion
-          _openInMaps(lat, lng);
+          // Navigate to the Map screen and pass coordinates for auto-zoom
+          Navigator.of(context).pushNamed(
+            '/map',
+            arguments: {
+              'autoHeadingHome': false,
+              'focusLat': lat,
+              'focusLng': lng,
+              'focusAddress': addr ?? message.message,
+            },
+          );
         }
       },
       child: Container(
@@ -416,8 +635,8 @@ class _LocationBubble extends StatelessWidget {
           borderRadius: BorderRadius.only(
             topLeft: const Radius.circular(20),
             topRight: const Radius.circular(20),
-            bottomLeft: Radius.circular(isRodel ? 20 : 4),
-            bottomRight: Radius.circular(isRodel ? 4 : 20),
+            bottomLeft: Radius.circular(isMe ? 20 : 4),
+            bottomRight: Radius.circular(isMe ? 4 : 20),
           ),
           border: Border.all(
             color: RodMaeColors.mint.withValues(alpha: 0.4),
@@ -425,22 +644,24 @@ class _LocationBubble extends StatelessWidget {
         ),
         clipBehavior: Clip.antiAlias,
         child: Column(
+          mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Map thumbnail
+            // ── Static map thumbnail ──────────────────────────────────────
             Stack(
               children: [
                 if (mapUrl != null)
-                  Image.network(
-                    mapUrl,
+                  CachedNetworkImage(
+                    imageUrl: mapUrl,
                     height: 130,
                     width: 240,
                     fit: BoxFit.cover,
-                    errorBuilder: (ctx, e, s) => _mapPlaceholder(),
+                    placeholder: (ctx, url) => _mapPlaceholder(),
+                    errorWidget: (ctx, url, err) => _mapPlaceholder(),
                   )
                 else
                   _mapPlaceholder(),
-                // Location pin overlay
+                // ── Pin overlay ───────────────────────────────────────────
                 Positioned.fill(
                   child: Center(
                     child: Container(
@@ -460,12 +681,46 @@ class _LocationBubble extends StatelessWidget {
                     ),
                   ),
                 ),
+                // ── Tap to open hint overlay ──────────────────────────────
+                if (hasCoords)
+                  Positioned(
+                    bottom: 6,
+                    right: 8,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: BackdropFilter(
+                        filter: ImageFilter.blur(sigmaX: 4, sigmaY: 4),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 4),
+                          color: Colors.black.withValues(alpha: 0.35),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.map_rounded,
+                                  size: 11, color: Colors.white70),
+                              const SizedBox(width: 4),
+                              Text(
+                                'Open in Map',
+                                style: GoogleFonts.inter(
+                                  color: Colors.white,
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
               ],
             ),
-            // Address row
+            // ── Address row ───────────────────────────────────────────────
             Padding(
               padding: const EdgeInsets.all(10),
               child: Column(
+                mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Row(
@@ -526,14 +781,6 @@ class _LocationBubble extends StatelessWidget {
           child: Icon(Icons.map_rounded, color: Colors.white24, size: 40),
         ),
       );
-
-  void _openInMaps(double lat, double lng) {
-    // Copy coords to clipboard as a fallback (no url_launcher dependency needed)
-    Clipboard.setData(ClipboardData(
-      text: 'https://maps.google.com/?q=$lat,$lng',
-    ));
-  }
-
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -543,12 +790,12 @@ class _LocationBubble extends StatelessWidget {
 class _LoveBubble extends StatelessWidget {
   final ChatMessage message;
   final Color timeColor;
-  final bool isRodel;
+  final bool isMe;
 
   const _LoveBubble({
     required this.message,
     required this.timeColor,
-    required this.isRodel,
+    required this.isMe,
   });
 
   @override
@@ -565,8 +812,8 @@ class _LoveBubble extends StatelessWidget {
         borderRadius: BorderRadius.only(
           topLeft: const Radius.circular(20),
           topRight: const Radius.circular(20),
-          bottomLeft: Radius.circular(isRodel ? 20 : 4),
-          bottomRight: Radius.circular(isRodel ? 4 : 20),
+          bottomLeft: Radius.circular(isMe ? 20 : 4),
+          bottomRight: Radius.circular(isMe ? 4 : 20),
         ),
         boxShadow: [
           BoxShadow(
@@ -577,6 +824,7 @@ class _LoveBubble extends StatelessWidget {
         ],
       ),
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text('❤️', style: TextStyle(fontSize: 28)),
@@ -615,19 +863,20 @@ class _LoveBubble extends StatelessWidget {
 class _ReadReceiptIndicator extends StatelessWidget {
   final MessageStatus status;
   final String partnerInitial;
+  final String? partnerAvatarUrl;
   final bool isDark;
 
   const _ReadReceiptIndicator({
     required this.status,
     required this.partnerInitial,
     required this.isDark,
+    this.partnerAvatarUrl,
   });
 
   @override
   Widget build(BuildContext context) {
     switch (status) {
       case MessageStatus.seen:
-        // Tiny circular avatar (partner's initial) — just like Messenger
         return Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -639,29 +888,26 @@ class _ReadReceiptIndicator extends StatelessWidget {
                 fontWeight: FontWeight.w600,
               ),
             ),
-            const SizedBox(width: 4),
-            Container(
-              width: 14,
-              height: 14,
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [RodMaeColors.rose, RodMaeColors.gold],
-                ),
-                shape: BoxShape.circle,
-              ),
-              child: Center(
-                child: Text(
-                  partnerInitial,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 8,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-              ),
+            const SizedBox(width: 5),
+            // ── Real partner PFP mini avatar ──────────────────────────────
+            SizedBox(
+              width: 16,
+              height: 16,
+              child: partnerAvatarUrl != null && partnerAvatarUrl!.isNotEmpty
+                  ? CachedNetworkImage(
+                      imageUrl: partnerAvatarUrl!,
+                      imageBuilder: (ctx, imageProvider) => CircleAvatar(
+                        radius: 8,
+                        backgroundImage: imageProvider,
+                      ),
+                      placeholder: (ctx, url) => _fallbackAvatar(),
+                      errorWidget: (ctx, url, err) => _fallbackAvatar(),
+                    )
+                  : _fallbackAvatar(),
             ),
           ],
         );
+
       case MessageStatus.delivered:
         return Row(
           mainAxisSize: MainAxisSize.min,
@@ -682,6 +928,7 @@ class _ReadReceiptIndicator extends StatelessWidget {
             ),
           ],
         );
+
       case MessageStatus.sent:
         return Row(
           mainAxisSize: MainAxisSize.min,
@@ -704,6 +951,27 @@ class _ReadReceiptIndicator extends StatelessWidget {
         );
     }
   }
+
+  Widget _fallbackAvatar() => Container(
+        width: 16,
+        height: 16,
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            colors: [RodMaeColors.rose, RodMaeColors.gold],
+          ),
+          shape: BoxShape.circle,
+        ),
+        child: Center(
+          child: Text(
+            partnerInitial,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 8,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ),
+      );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -715,29 +983,37 @@ class ChatComposer extends StatelessWidget {
   final bool sending;
   final VoidCallback onSend;
   final void Function(MessageType type)? onSpecialAction;
+  final ValueChanged<String>? onChanged;
+  final FocusNode? focusNode;
+  final bool hasKeyboard;
 
   const ChatComposer({
     required this.controller,
     required this.sending,
     required this.onSend,
+    required this.hasKeyboard,
     this.onSpecialAction,
+    this.onChanged,
+    this.focusNode,
     super.key,
   });
 
   @override
   Widget build(BuildContext context) {
+    final bottomPadding = hasKeyboard ? 12.0 : 94.0;
+
     return SafeArea(
       top: false,
       bottom: false,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(18, 8, 18, 94),
+        padding: EdgeInsets.fromLTRB(18, 8, 18, bottomPadding),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             Row(
               children: [
                 _MiniChatAction(
-                  icon: Icons.image_outlined,
+                  icon: Icons.photo_camera_rounded,
                   label: 'Image',
                   color: RodMaeColors.sky,
                   onTap: () => onSpecialAction?.call(MessageType.image),
@@ -764,10 +1040,12 @@ class ChatComposer extends StatelessWidget {
                 Expanded(
                   child: TextField(
                     controller: controller,
+                    focusNode: focusNode,
                     minLines: 1,
                     maxLines: 4,
                     textInputAction: TextInputAction.send,
                     onSubmitted: (_) => onSend(),
+                    onChanged: onChanged,
                     decoration: const InputDecoration(
                       hintText: 'Direct message to spouse or @assistant...',
                     ),

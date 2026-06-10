@@ -16,6 +16,7 @@ import '../models/love_trigger_event.dart';
 import '../models/couple_location.dart';
 import 'auth_service.dart';
 import 'firebase_service.dart';
+import 'notification_service.dart';
 
 final class SupabaseWeddingRepository {
   SupabaseWeddingRepository._();
@@ -288,14 +289,23 @@ final class SupabaseWeddingRepository {
 
     try {
       if (AppRuntime.supabaseReady) {
-        await _client.from('chat_history').insert({
+        final inserted = await _client.from('chat_history').insert({
           'couple_id': AppConfig.coupleId,
           'sender': PartnerIdentity.active.value.label,
           'message': message,
           'status': 'sent',
           'message_type': 'text',
           'created_at': DateTime.now().toIso8601String(),
-        });
+        }).select().single();
+
+        final messageId = inserted['id']?.toString() ?? '';
+        unawaited(NotificationService.sendPushToSpouse(
+          title: '${PartnerIdentity.active.value.label} 💬',
+          body: message,
+          type: 'chat',
+          sender: PartnerIdentity.active.value.label,
+          id: messageId,
+        ));
       }
     } catch (e) {
       print('Supabase sendChatMessage error: $e');
@@ -322,6 +332,35 @@ final class SupabaseWeddingRepository {
     try {
       if (AppRuntime.supabaseReady) {
         await _client.from('chat_history').insert(localMap);
+
+        String body = msg.message;
+        if (msg.messageType == MessageType.image) {
+          body = '📷 Sent an image';
+        } else if (msg.messageType == MessageType.location) {
+          body = '📍 Shared a location';
+        } else if (msg.messageType == MessageType.love) {
+          body = '💕 Sending love to you';
+        }
+
+        final pushType = msg.messageType == MessageType.love ? 'signal' : 'chat';
+        final pushTitle = msg.messageType == MessageType.love
+            ? '${msg.sender} sent a love signal! 💕'
+            : '${msg.sender} 💬';
+        final pushBody = msg.messageType == MessageType.love
+            ? 'I Love You'
+            : body;
+        final triggerType = msg.messageType == MessageType.love
+            ? 'I Love You'
+            : null;
+
+        unawaited(NotificationService.sendPushToSpouse(
+          title: pushTitle,
+          body: pushBody,
+          type: pushType,
+          sender: msg.sender,
+          triggerType: triggerType,
+          id: msg.id,
+        ));
       }
     } catch (e) {
       print('Supabase sendRichMessage error: $e');
@@ -651,12 +690,21 @@ final class SupabaseWeddingRepository {
 
     try {
       if (AppRuntime.supabaseReady) {
-        await _client.from('surprise_notes').insert({
+        final inserted = await _client.from('surprise_notes').insert({
           'couple_id': AppConfig.coupleId,
           'sender': PartnerIdentity.active.value.label,
           'content': content,
           'created_at': DateTime.now().toIso8601String(),
-        });
+        }).select().single();
+
+        final noteId = inserted['id']?.toString() ?? '';
+        unawaited(NotificationService.sendPushToSpouse(
+          title: 'Sweet note from ${PartnerIdentity.active.value.label} 🌸',
+          body: content,
+          type: 'note',
+          sender: PartnerIdentity.active.value.label,
+          id: noteId,
+        ));
       }
     } catch (e) {
       print('Supabase insertSurpriseNote error: $e');
@@ -752,11 +800,13 @@ final class SupabaseWeddingRepository {
   }
 
   Future<void> insertLoveTrigger(String triggerType) async {
+    final localId = DateTime.now().microsecondsSinceEpoch.toString();
     final localMap = {
-      'id': DateTime.now().microsecondsSinceEpoch.toString(),
+      'id': localId,
       'couple_id': AppConfig.coupleId,
       'sender': PartnerIdentity.active.value.label,
       'trigger_type': triggerType,
+      'status': 'sent',
       'created_at': DateTime.now().toIso8601String(),
     };
     final cached = await _loadCache('cached_triggers');
@@ -765,18 +815,48 @@ final class SupabaseWeddingRepository {
 
     try {
       if (AppRuntime.supabaseReady) {
-        await _client.from('love_triggers').insert({
+        final inserted = await _client.from('love_triggers').insert({
           'couple_id': AppConfig.coupleId,
           'sender': PartnerIdentity.active.value.label,
           'trigger_type': triggerType,
+          'status': 'sent',
           'created_at': DateTime.now().toIso8601String(),
-        });
+        }).select().single();
+
+        final triggerId = inserted['id']?.toString() ?? localId;
+        final senderName = PartnerIdentity.active.value.label;
+        unawaited(NotificationService.sendPushToSpouse(
+          title: '$senderName sent a love signal! 💕',
+          body: triggerType,
+          type: 'signal',
+          sender: senderName,
+          triggerType: triggerType,
+          id: triggerId,
+        ));
       }
     } catch (e) {
       print('Supabase insertLoveTrigger error: $e');
       rethrow;
     }
   }
+
+  /// Marks all love triggers from the partner as 'seen' in the database.
+  Future<void> markLoveTriggersAsSeen() async {
+    final mySender = PartnerIdentity.active.value.label;
+    try {
+      if (AppRuntime.supabaseReady) {
+        await _client
+            .from('love_triggers')
+            .update({'status': 'seen'})
+            .eq('couple_id', AppConfig.coupleId)
+            .neq('sender', mySender)
+            .inFilter('status', ['sent', 'delivered']);
+      }
+    } catch (e) {
+      print('Supabase markLoveTriggersAsSeen error: $e');
+    }
+  }
+
 
   // ─── User Profiles (PFP + Display Name + Bio) ─────────────────────────────
 
@@ -855,6 +935,7 @@ final class SupabaseWeddingRepository {
             .from('user_profiles')
             .insert(data);
       }
+      ProfileNotifier.notifyUpdate();
     } catch (e) {
       print('upsertUserProfile error: $e');
       rethrow;
@@ -884,6 +965,48 @@ final class SupabaseWeddingRepository {
       rethrow;
     }
   }
+
+  /// Upload compressed image bytes to the chat-media bucket and return public URL.
+  ///
+  /// [bytes]     — already-compressed JPEG bytes (caller must compress first)
+  /// [extension] — file extension WITHOUT the dot, e.g. 'jpg', 'png', 'webp'
+  ///
+  /// Stores files at: `{coupleId}/{timestamp}.{extension}`
+  /// Bucket is public so no signed URL is needed.
+  Future<String> uploadChatImage(Uint8List bytes, String extension) async {
+    if (!AppRuntime.supabaseReady) {
+      throw StateError('Supabase is not initialized. Cannot upload image.');
+    }
+
+    final timestamp = DateTime.now().microsecondsSinceEpoch;
+    final filename = '$timestamp.$extension';
+    final storagePath = '${AppConfig.coupleId}/$filename';
+
+    // Map extension to a valid MIME type accepted by the bucket policy
+    final contentType = switch (extension.toLowerCase()) {
+      'png'  => 'image/png',
+      'webp' => 'image/webp',
+      'gif'  => 'image/gif',
+      _      => 'image/jpeg', // jpeg / jpg fallback
+    };
+
+    await _client.storage
+        .from(AppConfig.chatMediaBucket)
+        .uploadBinary(
+          storagePath,
+          bytes,
+          fileOptions: FileOptions(
+            contentType: contentType,
+            upsert: false, // never silently overwrite
+          ),
+        );
+
+    // getPublicUrl is synchronous — bucket must be public (which it is)
+    return _client.storage
+        .from(AppConfig.chatMediaBucket)
+        .getPublicUrl(storagePath);
+  }
+
 
   // ─── Couple Settings ────────────────────────────────────────────────────────
 

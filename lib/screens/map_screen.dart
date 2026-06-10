@@ -41,7 +41,20 @@ enum TransitMode {
 
 class MapScreen extends StatefulWidget {
   final bool autoHeadingHome;
-  const MapScreen({super.key, this.autoHeadingHome = false});
+
+  /// When non-null, the map will immediately center and zoom to this coordinate
+  /// (used when the user taps a location bubble in chat).
+  final double? focusLat;
+  final double? focusLng;
+  final String? focusAddress;
+
+  const MapScreen({
+    super.key,
+    this.autoHeadingHome = false,
+    this.focusLat,
+    this.focusLng,
+    this.focusAddress,
+  });
 
   @override
   State<MapScreen> createState() => _MapScreenState();
@@ -271,6 +284,47 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     _listenToSpouseAndStaticLocations();
     _subscribeToBroadcast();
     _loadUserAvatars();
+    ProfileNotifier.updateNotifier.addListener(_loadUserAvatars);
+
+    // ── Auto-focus a location shared from a chat bubble ─────────────────────
+    if (widget.focusLat != null && widget.focusLng != null) {
+      // Defer until after first frame so MapController is ready
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final target = LatLng(widget.focusLat!, widget.focusLng!);
+        _mapController.move(target, 16.0);
+        // Mark a search pin so the user sees a visible marker
+        setState(() => _searchPin = target);
+        // Show a dismissible snackbar with the address
+        if (widget.focusAddress != null && widget.focusAddress!.isNotEmpty) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Row(
+                children: [
+                  const Icon(Icons.place_rounded,
+                      color: Colors.white, size: 16),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      widget.focusAddress!,
+                      style: const TextStyle(
+                          color: Colors.white, fontWeight: FontWeight.w700),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+              backgroundColor: const Color(0xFF1A3050),
+              duration: const Duration(seconds: 5),
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14)),
+            ),
+          );
+        }
+      });
+    }
 
     if (widget.autoHeadingHome) {
       Future.delayed(const Duration(seconds: 3), () {
@@ -288,6 +342,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    ProfileNotifier.updateNotifier.removeListener(_loadUserAvatars);
     _positionStreamSub?.cancel();
     _locationsSub?.cancel();
     _spousePresenceSub?.cancel();

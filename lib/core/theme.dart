@@ -10,7 +10,7 @@ final class RodMaeColors {
   static const Color navy          = Color(0xFF0C1445);  // card surface dark
   static const Color navy2         = Color(0xFF0F1A55);  // elevated surface dark
   static const Color charcoal      = Color(0xFF111827);
-git
+
   // === ROYAL BLUE PRIMARIES ===
   static const Color royalBlue     = Color(0xFF1D4ED8);  // blue-700
   static const Color sapphire      = Color(0xFF1E40AF);  // blue-800

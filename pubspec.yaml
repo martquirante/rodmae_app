@@ -23,8 +23,13 @@ dependencies:
   supabase_flutter: ^2.8.0
   shared_preferences: ^2.5.5
   geolocator: ^14.0.2
+  geocoding: ^3.0.0
   http: ^1.6.0
   connectivity_plus: ^6.1.4
+  url_launcher: ^6.3.0
+  any_link_preview: ^3.0.0
+  cached_network_image: ^3.4.1
+  flutter_image_compress: ^2.3.0
 
 dev_dependencies:
   flutter_test:

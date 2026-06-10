@@ -23,7 +23,7 @@
         <!-- FCM: Set default notification channel for Android 8+ -->
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
-            android:value="rodmae_love_channel" />
+            android:value="rodmae_high_priority_channel_v2" />
 
         <!-- FCM: Custom notification icon and color -->
         <meta-data

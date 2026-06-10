@@ -5,6 +5,8 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../core/theme.dart';
 import '../core/constants.dart';
+import '../models/chat_message.dart';
+import '../models/love_trigger_event.dart';
 import '../services/auth_service.dart';
 import '../services/firebase_service.dart';
 import '../services/supabase_service.dart';
@@ -14,26 +16,31 @@ import '../services/connectivity_service.dart';
 class RodMaePageFrame extends StatelessWidget {
   final Widget child;
   final EdgeInsetsGeometry padding;
+  final bool? hasKeyboard;
 
   const RodMaePageFrame({
     required this.child,
     this.padding = const EdgeInsets.fromLTRB(18, 8, 18, 12),
+    this.hasKeyboard,
     super.key,
   });
 
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final resolvedHasKeyboard = hasKeyboard ?? (MediaQuery.viewInsetsOf(context).bottom > 0);
+
     return DecoratedBox(
       decoration: BoxDecoration(gradient: RodMaeColors.getAppBackground(isDark)),
       child: SafeArea(
         bottom: false,
         child: Column(
           children: [
-            Padding(
-              padding: padding,
-              child: const RodMaeHeader(),
-            ),
+            if (!resolvedHasKeyboard)
+              Padding(
+                padding: padding,
+                child: const RodMaeHeader(),
+              ),
             Expanded(child: child),
           ],
         ),
@@ -57,11 +64,13 @@ class _RodMaeHeaderState extends State<RodMaeHeader> {
     super.initState();
     _loadAvatar();
     PartnerIdentity.active.addListener(_loadAvatar);
+    ProfileNotifier.updateNotifier.addListener(_loadAvatar);
   }
 
   @override
   void dispose() {
     PartnerIdentity.active.removeListener(_loadAvatar);
+    ProfileNotifier.updateNotifier.removeListener(_loadAvatar);
     super.dispose();
   }
 
@@ -405,6 +414,43 @@ class _StatusChip extends StatelessWidget {
 }
 
 
+class ChatBadgeWrapper extends StatelessWidget {
+  final Widget Function(BuildContext context, int count) builder;
+
+  const ChatBadgeWrapper({required this.builder, super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<PartnerProfile>(
+      valueListenable: PartnerIdentity.active,
+      builder: (context, activeProfile, _) {
+        final myLabel = activeProfile.label.toLowerCase();
+        return StreamBuilder<List<ChatMessage>>(
+          stream: SupabaseWeddingRepository.instance.watchChat(),
+          builder: (context, chatSnapshot) {
+            final chatList = chatSnapshot.data ?? [];
+            final chatUnread = chatList.where((m) =>
+                m.sender.toLowerCase() != myLabel &&
+                m.status != MessageStatus.seen).length;
+
+            return StreamBuilder<List<LoveTriggerEvent>>(
+              stream: SupabaseWeddingRepository.instance.watchLoveTriggers(),
+              builder: (context, signalSnapshot) {
+                final signalList = signalSnapshot.data ?? [];
+                final signalUnread = signalList.where((s) =>
+                    s.sender.toLowerCase() != myLabel &&
+                    s.status != MessageStatus.seen).length;
+
+                return builder(context, chatUnread + signalUnread);
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
 class RodMaeBottomNavBar extends StatelessWidget {
   final int selectedIndex;
   final ValueChanged<int> onSelected;
@@ -458,6 +504,18 @@ class RodMaeBottomNavBar extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: List.generate(items.length, (index) {
                 final spec = items[index];
+                if (index == 1) {
+                  return ChatBadgeWrapper(
+                    builder: (context, count) {
+                      return _NavButton(
+                        spec: spec,
+                        selected: selectedIndex == index,
+                        badgeCount: count,
+                        onTap: () => onSelected(index),
+                      );
+                    },
+                  );
+                }
                 return _NavButton(
                   spec: spec,
                   selected: selectedIndex == index,
@@ -483,11 +541,13 @@ class _NavButton extends StatelessWidget {
   final _NavSpec spec;
   final bool selected;
   final VoidCallback onTap;
+  final int badgeCount;
 
   const _NavButton({
     required this.spec,
     required this.selected,
     required this.onTap,
+    this.badgeCount = 0,
   });
 
   @override
@@ -537,12 +597,42 @@ class _NavButton extends StatelessWidget {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(
-                spec.icon,
-                color: selected
-                    ? RodMaeColors.gold
-                    : (isDark ? Colors.white38 : RodMaeColors.lightTextMuted),
-                size: 22,
+              Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Icon(
+                    spec.icon,
+                    color: selected
+                        ? RodMaeColors.gold
+                        : (isDark ? Colors.white38 : RodMaeColors.lightTextMuted),
+                    size: 22,
+                  ),
+                  if (badgeCount > 0)
+                    Positioned(
+                      top: -4,
+                      right: -6,
+                      child: Container(
+                        padding: const EdgeInsets.all(3),
+                        decoration: const BoxDecoration(
+                          color: RodMaeColors.rose,
+                          shape: BoxShape.circle,
+                        ),
+                        constraints: const BoxConstraints(
+                          minWidth: 14,
+                          minHeight: 14,
+                        ),
+                        child: Text(
+                          '$badgeCount',
+                          style: GoogleFonts.inter(
+                            color: Colors.white,
+                            fontSize: 8,
+                            fontWeight: FontWeight.w800,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ),
+                ],
               ),
               const SizedBox(height: 4),
               Text(
@@ -624,12 +714,14 @@ class SegmentedSwitcher extends StatelessWidget {
   final List<IconData> icons;
   final int selected;
   final ValueChanged<int> onSelected;
+  final List<int>? badgeCounts;
 
   const SegmentedSwitcher({
     required this.labels,
     required this.icons,
     required this.selected,
     required this.onSelected,
+    this.badgeCounts,
     super.key,
   });
 
@@ -662,10 +754,30 @@ class SegmentedSwitcher extends StatelessWidget {
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Icon(
-                      icons[index],
-                      size: 15,
-                      color: active ? Colors.white : (isDark ? Colors.white38 : RodMaeColors.lightTextSoft),
+                    Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        Icon(
+                          icons[index],
+                          size: 15,
+                          color: active ? Colors.white : (isDark ? Colors.white38 : RodMaeColors.lightTextSoft),
+                        ),
+                        if (badgeCounts != null &&
+                            index < badgeCounts!.length &&
+                            badgeCounts![index] > 0)
+                          Positioned(
+                            top: -4,
+                            right: -5,
+                            child: Container(
+                              width: 8,
+                              height: 8,
+                              decoration: const BoxDecoration(
+                                color: RodMaeColors.rose,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
                     const SizedBox(width: 7),
                     Flexible(

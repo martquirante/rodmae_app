@@ -154,7 +154,6 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen>
       Navigator.of(context).pushNamed('/map', arguments: {'autoHeadingHome': true});
     }
 
-    final sender = PartnerIdentity.active.value.label;
     if (!AppRuntime.supabaseReady) {
       if (mounted && !isHeadingHome) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -170,13 +169,6 @@ class _HomeDashboardScreenState extends State<HomeDashboardScreen>
 
     try {
       await SupabaseWeddingRepository.instance.insertLoveTrigger(trigger.title);
-      await NotificationService.sendPushToSpouse(
-        title: '$sender sent a love signal',
-        body: trigger.title,
-        type: 'signal',
-        sender: sender,
-        triggerType: trigger.title,
-      );
       if (mounted && !isHeadingHome) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('${trigger.title} sent to your spouse.')),
@@ -847,6 +839,13 @@ class _CoupleMapCardState extends State<CoupleMapCard> {
     super.initState();
     _loadAvatars();
     _determineDeviceLocation();
+    ProfileNotifier.updateNotifier.addListener(_loadAvatars);
+  }
+
+  @override
+  void dispose() {
+    ProfileNotifier.updateNotifier.removeListener(_loadAvatars);
+    super.dispose();
   }
 
   Future<void> _determineDeviceLocation() async {

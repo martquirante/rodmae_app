@@ -4,7 +4,9 @@ final class AppConfig {
   AppConfig._();
 
   static const String coupleId = 'couple-rodel-marymae-2026';
-  static const String vaultBucket = 'rodmae-vault';
+  static const String vaultBucket    = 'rodmae-vault';
+  static const String chatMediaBucket = 'rodmae-chat-media';
+
   static const String geminiApiKey = 'YOUR_GEMINI_API_KEY';
   static const String supabaseUrl = 'https://axqbpjafmlwvqnhodtph.supabase.co';
   static const String supabaseAnonKey =

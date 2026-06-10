@@ -1,9 +1,11 @@
 // ignore_for_file: use_build_context_synchronously
 
 import 'dart:async';
+import 'dart:convert';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter_native_splash/flutter_native_splash.dart';
 
@@ -19,6 +21,7 @@ import 'services/connectivity_service.dart';
 import 'widgets/network_banner.dart';
 import 'models/meal_plan.dart';
 import 'models/couple_location.dart';
+import 'models/chat_message.dart';
 import 'package:geolocator/geolocator.dart';
 import 'widgets/common_widgets.dart';
 import 'widgets/love_overlay.dart';
@@ -108,7 +111,12 @@ class RodMaeApp extends StatelessWidget {
                 page = MainNavigationShell(startup: args);
               case '/map':
                 final mapArgs = settings.arguments as Map<String, dynamic>?;
-                page = MapScreen(autoHeadingHome: mapArgs?['autoHeadingHome'] == true);
+                page = MapScreen(
+                  autoHeadingHome: mapArgs?['autoHeadingHome'] == true,
+                  focusLat: mapArgs?['focusLat'] as double?,
+                  focusLng: mapArgs?['focusLng'] as double?,
+                  focusAddress: mapArgs?['focusAddress'] as String?,
+                );
               case '/settings':
                 page = const AccountSettingsScreen();
               default:
@@ -157,6 +165,7 @@ class _MainNavigationShellState extends State<MainNavigationShell>
   // Stream state indicators to prevent startup spam
   bool _chatStreamInitialized = false;
   bool _notesStreamInitialized = false;
+  bool _signalsStreamInitialized = false;
   final Set<String> _knownMessageIds = {};
   final Set<String> _knownNoteIds = {};
   String? _lastSpouseStatus;
@@ -249,6 +258,43 @@ class _MainNavigationShellState extends State<MainNavigationShell>
     // Attach global presence tracking for the active partner
     PresenceController.instance.attach(PartnerIdentity.active.value.label);
     PartnerIdentity.active.addListener(_updatePresenceAttachment);
+
+    // Request permissions for notifications on mount (crucial for Android 13+)
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await NotificationService.requestPermission();
+      unawaited(NotificationService.markAllPendingMessagesAsDelivered());
+
+      // Trigger diagnostic test notification to verify native notifications and sound are working locally
+      try {
+        final testDetails = NotificationDetails(
+          android: const AndroidNotificationDetails(
+            'rodmae_high_priority_channel_v2',
+            'RodMae High Priority Alerts',
+            channelDescription: 'Real-time love signals, chats, and notes from your partner',
+            importance: Importance.max,
+            priority: Priority.high,
+            playSound: true,
+            enableVibration: true,
+            largeIcon: null,
+            ticker: 'RodMae Diagnostic Alert',
+          ),
+          iOS: const DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: true,
+          ),
+        );
+        await NotificationService.instance.flutterLocalNotificationsPlugin.show(
+          888,
+          'RodMae Diagnostic Alert 🔔',
+          'Native notifications and sound are working!',
+          testDetails,
+          payload: jsonEncode({'type': 'test'}),
+        );
+      } catch (e) {
+        debugPrint('MainNavigationShell: failed to show diagnostic notification: $e');
+      }
+    });
   }
 
   void _onMainTabNotifierChanged() {
@@ -347,6 +393,29 @@ class _MainNavigationShellState extends State<MainNavigationShell>
       if (!mounted || events.isEmpty) return;
 
       final currentPartner = PartnerIdentity.active.value.label.toLowerCase();
+
+      // Update status for any sent triggers from partner
+      for (final sig in events) {
+        final isSpouse = sig.sender.toLowerCase() != currentPartner;
+        if (isSpouse && sig.status == MessageStatus.sent) {
+          final onSignalsTab = AppNotificationNavigation.mainTabNotifier.value == 1 &&
+              AppNotificationNavigation.privateChatTabNotifier.value == 2;
+          if (onSignalsTab) {
+            unawaited(NotificationService.markMessageAsSeen(sig.id, type: 'signal'));
+          } else {
+            unawaited(NotificationService.markMessageAsDelivered(sig.id, type: 'signal'));
+          }
+        }
+      }
+
+      if (!_signalsStreamInitialized) {
+        _signalsStreamInitialized = true;
+        for (final sig in events) {
+          _processedSignalIds.add(sig.id);
+        }
+        return;
+      }
+
       // Use UTC for both sides to avoid any local-vs-UTC comparison bugs.
       // Allow signals from up to 90 seconds before this session started (grace window).
       final cutoff = _appStartTime.subtract(const Duration(seconds: 90));
@@ -370,17 +439,6 @@ class _MainNavigationShellState extends State<MainNavigationShell>
           _lottieController
             ..reset()
             ..forward();
-
-          AppNotificationNavigation.show(
-            title: '${latest.sender} sent a love signal! 💕',
-            message: '${latest.triggerType}: ${trigger.subtitle}',
-            icon: trigger.icon,
-            color: trigger.color,
-            onTap: () {
-              AppNotificationNavigation.mainTabNotifier.value = 1;
-              AppNotificationNavigation.privateChatTabNotifier.value = 2;
-            },
-          );
         }
         break;
       }
@@ -391,6 +449,20 @@ class _MainNavigationShellState extends State<MainNavigationShell>
     _chatSub = SupabaseWeddingRepository.instance.watchChat().listen((messages) {
       if (!mounted) return;
       final currentPartner = PartnerIdentity.active.value.label.toLowerCase();
+
+      // Update status for any sent messages from partner
+      for (final msg in messages) {
+        final isSpouse = msg.sender.toLowerCase() != currentPartner;
+        if (isSpouse && msg.status == MessageStatus.sent) {
+          final onChatTab = AppNotificationNavigation.mainTabNotifier.value == 1 &&
+              AppNotificationNavigation.privateChatTabNotifier.value == 0;
+          if (onChatTab) {
+            unawaited(NotificationService.markMessageAsSeen(msg.id, type: 'chat'));
+          } else {
+            unawaited(NotificationService.markMessageAsDelivered(msg.id, type: 'chat'));
+          }
+        }
+      }
 
       if (!_chatStreamInitialized) {
         _chatStreamInitialized = true;
@@ -403,24 +475,6 @@ class _MainNavigationShellState extends State<MainNavigationShell>
       for (final msg in messages) {
         if (!_knownMessageIds.contains(msg.id)) {
           _knownMessageIds.add(msg.id);
-          final isSpouse = msg.sender.toLowerCase() != currentPartner;
-
-          if (isSpouse) {
-            final onChatTab = AppNotificationNavigation.mainTabNotifier.value == 1 &&
-                              AppNotificationNavigation.privateChatTabNotifier.value == 0;
-            if (!onChatTab) {
-              AppNotificationNavigation.show(
-                title: 'New message from ${msg.sender} 💬',
-                message: msg.message,
-                icon: Icons.chat_bubble_rounded,
-                color: RodMaeColors.electricBlue,
-                onTap: () {
-                  AppNotificationNavigation.mainTabNotifier.value = 1;
-                  AppNotificationNavigation.privateChatTabNotifier.value = 0; // Chat tab
-                },
-              );
-            }
-          }
         }
       }
     });
@@ -457,22 +511,7 @@ class _MainNavigationShellState extends State<MainNavigationShell>
               });
             }
 
-            // ── SECONDARY: also show a banner for quick re-access ────────────
-            final onNotesTab =
-                AppNotificationNavigation.mainTabNotifier.value == 1 &&
-                AppNotificationNavigation.privateChatTabNotifier.value == 1;
-            if (!onNotesTab) {
-              AppNotificationNavigation.show(
-                title: 'Sweet note from ${note.sender} 🌸',
-                message: note.content,
-                icon: Icons.sticky_note_2_rounded,
-                color: RodMaeColors.gold,
-                onTap: () {
-                  AppNotificationNavigation.mainTabNotifier.value = 1;
-                  AppNotificationNavigation.privateChatTabNotifier.value = 1;
-                },
-              );
-            }
+            // Rely on FCM foreground listener to render native tray/heads-up notification
           }
         }
       }
@@ -517,15 +556,30 @@ class _MainNavigationShellState extends State<MainNavigationShell>
         _lastSpouseStatus = currentStatus;
         final spouseName = PartnerIdentity.active.value == PartnerProfile.rodel ? 'Eurine' : 'Rodel';
         
-        AppNotificationNavigation.show(
-          title: 'Spouse Location Update',
-          message: '$spouseName is now $currentStatus',
-          icon: Icons.location_on_rounded,
-          color: RodMaeColors.mint,
-          onTap: () {
-            AppNotificationNavigation.mainTabNotifier.value = 0; // Go to Home tab
-            Navigator.of(context).pushNamed('/map');
-          },
+        final details = NotificationDetails(
+          android: AndroidNotificationDetails(
+            'rodmae_high_priority_channel_v2',
+            'RodMae High Priority Alerts',
+            channelDescription: 'Real-time love signals, chats, and notes from your partner',
+            importance: Importance.max,
+            priority: Priority.high,
+            color: RodMaeColors.mint,
+            icon: null,
+            largeIcon: null,
+            ticker: 'Spouse Location Update',
+          ),
+          iOS: const DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: true,
+          ),
+        );
+        NotificationService.instance.flutterLocalNotificationsPlugin.show(
+          999,
+          'Spouse Location Update',
+          '$spouseName is now $currentStatus',
+          details,
+          payload: jsonEncode({'type': 'location'}),
         );
       }
     });
@@ -600,6 +654,7 @@ class _MainNavigationShellState extends State<MainNavigationShell>
       try {
         Supabase.instance.client.realtime.connect();
       } catch (_) {}
+      unawaited(NotificationService.markAllPendingMessagesAsDelivered());
     }
   }
 
@@ -612,6 +667,7 @@ class _MainNavigationShellState extends State<MainNavigationShell>
       const VaultMemoriesScreen(),
     ];
     return Scaffold(
+      resizeToAvoidBottomInset: true,
       extendBody: true,
       body: Stack(
         children: [
@@ -638,6 +694,10 @@ class _MainNavigationShellState extends State<MainNavigationShell>
       bottomNavigationBar: ValueListenableBuilder<int>(
         valueListenable: AppNotificationNavigation.mainTabNotifier,
         builder: (context, activeIndex, _) {
+          final keyboardHeight = MediaQuery.viewInsetsOf(context).bottom;
+          if (keyboardHeight > 0) {
+            return const SizedBox.shrink();
+          }
           return RodMaeBottomNavBar(
             selectedIndex: activeIndex,
             onSelected: (value) {

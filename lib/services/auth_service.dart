@@ -121,3 +121,13 @@ final class AuthService {
   Stream<AuthState> get authStateChanges => _client.auth.onAuthStateChange;
 }
 
+final class ProfileNotifier {
+  ProfileNotifier._();
+
+  static final ValueNotifier<int> updateNotifier = ValueNotifier<int>(0);
+
+  static void notifyUpdate() {
+    updateNotifier.value++;
+  }
+}
+
