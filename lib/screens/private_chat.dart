@@ -1,7 +1,11 @@
 // ignore_for_file: use_build_context_synchronously
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
+import '../models/finance_entry.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:geolocator/geolocator.dart';
@@ -12,7 +16,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../core/theme.dart';
 import '../widgets/advanced_loading_effect.dart';
 import '../core/constants.dart';
-import '../core/utils.dart';
+import '../core/time_utils.dart';
+import 'package:ntp/ntp.dart';
 import '../models/chat_message.dart';
 import '../models/surprise_note.dart';
 import '../models/love_trigger_event.dart';
@@ -21,6 +26,7 @@ import '../services/auth_service.dart';
 import '../services/firebase_service.dart';
 import '../services/supabase_service.dart';
 import '../services/notification_service.dart';
+import '../services/ai_service.dart';
 import '../widgets/chat_bubble.dart';
 import '../widgets/glass_card.dart';
 import '../widgets/primary_button.dart';
@@ -38,12 +44,14 @@ class PrivateChatScreen extends StatefulWidget {
 class _PrivateChatScreenState extends State<PrivateChatScreen>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   int _tab = 0;
-  final _chatController = TextEditingController();
+  final _chatController = MentionTextEditingController();
   final _noteController = TextEditingController();
   final _scrollController = ScrollController();
   final _chatFocusNode = FocusNode();
-  final _pendingMessages = <ChatMessage>[];
+  final _optimisticMessages = <ChatMessage>[];
+  final _failedMessageIds = <String>{};
   bool _sendingChat = false;
+  bool _isAssistantTyping = false;
   bool _sendingNote = false;
   bool _isRefreshingChat = false;
   bool _isRefreshingNotes = false;
@@ -60,9 +68,7 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
   late final Stream<List<LoveTriggerEvent>> _switcherSignalsStream;
 
   // ── Profile pictures ───────────────────────────────────────────────────────
-  /// Avatar URL for Rodel
   String? _rodelAvatarUrl;
-  /// Avatar URL for Eurine
   String? _eurineAvatarUrl;
 
   // ── Image upload state ─────────────────────────────────────────────────────
@@ -79,6 +85,9 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
   bool _isPartnerTyping = false;
   bool _wasKeyboardOpen = false;
   bool _lastHasKeyboardState = false;
+  ChatMessage? _replyingToMessage;
+  ChatMessage? _editingMessage;
+  bool _showAssistantSuggestion = false;
 
   @override
   void initState() {
@@ -99,11 +108,11 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
       }
     });
 
-    _chatStream = SupabaseWeddingRepository.instance.watchChat();
-    _switcherChatStream = SupabaseWeddingRepository.instance.watchChat();
-    _notesStream = SupabaseWeddingRepository.instance.watchNotes();
-    _signalsStream = SupabaseWeddingRepository.instance.watchLoveTriggers();
-    _switcherSignalsStream = SupabaseWeddingRepository.instance.watchLoveTriggers();
+    _chatStream = SupabaseWeddingRepository.instance.watchChat().asBroadcastStream();
+    _switcherChatStream = SupabaseWeddingRepository.instance.watchChat().asBroadcastStream();
+    _notesStream = SupabaseWeddingRepository.instance.watchNotes().asBroadcastStream();
+    _signalsStream = SupabaseWeddingRepository.instance.watchLoveTriggers().asBroadcastStream();
+    _switcherSignalsStream = SupabaseWeddingRepository.instance.watchLoveTriggers().asBroadcastStream();
 
     _lottieController = AnimationController(vsync: this);
     _lottieController.addStatusListener((status) {
@@ -123,11 +132,9 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
     // Load PFPs in the background — non-blocking
     _loadAvatars();
 
-    // Mark messages/signals as seen when the screen opens
+    // Mark signals as seen when the screen opens (chat seen is handled by ViewportIntersectionObserver)
     if (AppNotificationNavigation.mainTabNotifier.value == 1) {
-      if (_tab == 0) {
-        SupabaseWeddingRepository.instance.markMessagesAsSeen();
-      } else if (_tab == 2) {
+      if (_tab == 2) {
         SupabaseWeddingRepository.instance.markLoveTriggersAsSeen();
       }
     }
@@ -168,18 +175,22 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
     } catch (_) {}
   }
 
-  /// Returns the avatar URL for a given sender name.
   String? _avatarFor(String sender) {
     final lower = sender.toLowerCase();
     if (lower.contains('rodel')) return _rodelAvatarUrl;
     return _eurineAvatarUrl;
   }
 
-  /// Returns the partner's avatar URL (the person who READS the message).
   String? get _partnerAvatarUrl {
     return PartnerIdentity.active.value == PartnerProfile.rodel
         ? _eurineAvatarUrl
         : _rodelAvatarUrl;
+  }
+
+  String? get _myAvatarUrl {
+    return PartnerIdentity.active.value == PartnerProfile.rodel
+        ? _rodelAvatarUrl
+        : _eurineAvatarUrl;
   }
 
   void _updateChatActiveStatus() {
@@ -190,9 +201,7 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
     NotificationService.isChatActive = isChatOpen;
 
     if (mainTab == 1 && mounted) {
-      if (subTab == 0) {
-        SupabaseWeddingRepository.instance.markMessagesAsSeen();
-      } else if (subTab == 2) {
+      if (subTab == 2) {
         SupabaseWeddingRepository.instance.markLoveTriggersAsSeen();
       }
     }
@@ -277,6 +286,14 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
         _sendTypingStatus(false);
       }
     });
+
+    // Mention overlay toggle logic
+    final showOverlay = text.endsWith('@') || text == '@';
+    if (showOverlay != _showAssistantSuggestion) {
+      setState(() {
+        _showAssistantSuggestion = showOverlay;
+      });
+    }
   }
 
   @override
@@ -348,47 +365,247 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
     }
   }
 
+  bool _isOptimisticMatch(ChatMessage optimistic, ChatMessage server) {
+    if (optimistic.sender != server.sender) return false;
+    if (optimistic.messageType != server.messageType) return false;
+    
+    if (optimistic.messageType == MessageType.voice) {
+      final diff = optimistic.createdAt.difference(server.createdAt).abs();
+      return diff.inSeconds < 45;
+    }
+
+    if (optimistic.message != server.message) return false;
+    if (optimistic.imageUrl != server.imageUrl) return false;
+    if (optimistic.locationData != server.locationData) return false;
+    
+    final diff = optimistic.createdAt.difference(server.createdAt).abs();
+    return diff.inSeconds < 30;
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients && mounted) {
+        _scrollController.animateTo(
+          0.0,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  Future<void> _retryMessage(ChatMessage failedMsg) async {
+    final tempId = failedMsg.id;
+    setState(() {
+      _failedMessageIds.remove(tempId);
+    });
+
+    try {
+      if (failedMsg.messageType == MessageType.text) {
+        await SupabaseWeddingRepository.instance.sendChatMessage(
+          failedMsg.message,
+          replyToId: failedMsg.replyToId,
+          replyToSender: failedMsg.replyToSender,
+          replyToText: failedMsg.replyToText,
+        );
+      } else if (failedMsg.messageType == MessageType.voice) {
+        final filePath = failedMsg.voiceUrl;
+        if (filePath != null && filePath.isNotEmpty) {
+          final isLocal = !filePath.startsWith('http');
+          String finalUrl = filePath;
+          if (isLocal) {
+            finalUrl = await SupabaseWeddingRepository.instance.uploadVoiceMessage(filePath);
+            final file = File(filePath);
+            if (await file.exists()) {
+              await file.delete();
+            }
+          }
+          await SupabaseWeddingRepository.instance.sendChatMessage(
+            '',
+            replyToId: failedMsg.replyToId,
+            replyToSender: failedMsg.replyToSender,
+            replyToText: failedMsg.replyToText,
+            voiceUrl: finalUrl,
+          );
+        }
+      } else {
+        await SupabaseWeddingRepository.instance.sendRichMessage(failedMsg);
+      }
+      setState(() {
+        _optimisticMessages.removeWhere((x) => x.id == tempId);
+      });
+    } catch (error) {
+      setState(() {
+        _failedMessageIds.add(tempId);
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to resend message.')),
+        );
+      }
+    }
+  }
+
   // ── Message sending ────────────────────────────────────────────────────────
 
   Future<void> _sendMessage() async {
     final text = _chatController.text.trim();
-    if (text.isEmpty || _sendingChat) return;
-    setState(() => _sendingChat = true);
-    _chatController.clear();
+    if (text.isEmpty) return;
 
-    // Reset typing status immediately on message send
+    if (_editingMessage != null) {
+      final msgToEdit = _editingMessage!;
+      setState(() {
+        _editingMessage = null;
+        _chatController.clear();
+      });
+      try {
+        await SupabaseWeddingRepository.instance.editMessage(msgToEdit.id, text);
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Failed to edit message: $e')),
+          );
+        }
+      }
+      return;
+    }
+
     _typingTimer?.cancel();
     if (_isLocalTyping) {
       _isLocalTyping = false;
       _sendTypingStatus(false);
     }
 
-    final localMessage = ChatMessage(
-      id: DateTime.now().microsecondsSinceEpoch.toString(),
-      sender: PartnerIdentity.active.value.label,
-      message: text,
-      createdAt: DateTime.now(),
-      status: MessageStatus.sent,
-    );
+    final replyId = _replyingToMessage?.id;
+    final replySender = _replyingToMessage?.sender;
+    final replyText = _replyingToMessage?.message;
 
+    final tempId = '-temp_${DateTime.now().microsecondsSinceEpoch}';
+
+    // Clear composer and insert optimistic message IMMEDIATELY to avoid "ghosting"
+    setState(() {
+      _chatController.clear();
+      _replyingToMessage = null;
+      _optimisticMessages.add(ChatMessage(
+        id: tempId,
+        sender: PartnerIdentity.active.value.label,
+        message: text,
+        createdAt: DateTime.now(), // initial local time fallback
+        status: MessageStatus.sent,
+        replyToId: replyId,
+        replyToSender: replySender,
+        replyToText: replyText,
+      ));
+    });
+
+    _scrollToBottom();
+
+    final isAssistantCommand = text.startsWith('@assistant');
+
+    // Fetch the true time via NTP.now() with fallback
+    DateTime trueTime;
     try {
-      await SupabaseWeddingRepository.instance.sendChatMessage(text);
-      if (!AppRuntime.supabaseReady) {
-        setState(() => _pendingMessages.add(localMessage));
-      }
-    } catch (error) {
-      setState(() => _pendingMessages.add(localMessage));
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Message saved locally (Offline).')),
+      trueTime = await NTP.now(timeout: const Duration(seconds: 3));
+    } catch (_) {
+      trueTime = DateTime.now();
+    }
+    final trueTimeUtcStr = trueTime.toUtc().toIso8601String();
+    final parsedTrueTime = DateTime.parse(trueTimeUtcStr).toLocal();
+
+    // Update optimistic message with the NTP-derived time
+    setState(() {
+      final index = _optimisticMessages.indexWhere((m) => m.id == tempId);
+      if (index != -1) {
+        _optimisticMessages[index] = _optimisticMessages[index].copyWith(
+          createdAt: parsedTrueTime,
         );
       }
-    } finally {
-      if (mounted) setState(() => _sendingChat = false);
+    });
+
+    try {
+      await SupabaseWeddingRepository.instance.sendChatMessage(
+        text,
+        replyToId: replyId,
+        replyToSender: replySender,
+        replyToText: replyText,
+      );
+    } catch (error) {
+      setState(() {
+        _failedMessageIds.add(tempId);
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not send message. Saved locally.')),
+        );
+      }
+    }
+
+    if (isAssistantCommand) {
+      _runAssistantQuery(text);
     }
   }
 
-  /// Handles Image / Location / Love quick-action buttons.
+  Future<void> _runAssistantQuery(String userPrompt) async {
+    if (!mounted) return;
+    setState(() {
+      _isAssistantTyping = true;
+    });
+
+    try {
+      final cleanPrompt = userPrompt.replaceFirst(RegExp(r'^@assistant\s*'), '').trim();
+      final response = await AiService.askAssistant(cleanPrompt);
+      
+      String cleanResponse = response;
+      final jsonMatch = RegExp(r'\|\|\|(.*?)\|\|\|', dotAll: true).firstMatch(response);
+      if (jsonMatch != null) {
+        try {
+          final jsonStr = jsonMatch.group(1)?.trim();
+          if (jsonStr != null) {
+            final decoded = jsonDecode(jsonStr);
+            if (decoded['action'] == 'LOG_TRANSACTION') {
+              final double amount = (decoded['amount'] as num).toDouble();
+              final type = FinanceType.from(decoded['type']);
+              final category = decoded['category'] ?? 'Shared';
+              final title = 'Logged via AI Chat';
+              
+              await SupabaseWeddingRepository.instance.insertFinance(
+                FinanceEntry(
+                  id: DateTime.now().microsecondsSinceEpoch.toString(),
+                  title: title,
+                  category: category,
+                  amount: amount,
+                  type: type,
+                  date: DateTime.now(),
+                  createdBy: PartnerIdentity.active.value.label,
+                ),
+              );
+            }
+          }
+        } catch (e) {
+          debugPrint('Error parsing/inserting AI transaction: $e');
+        }
+        cleanResponse = response.replaceAll(RegExp(r'\|\|\|(.*?)\|\|\|', dotAll: true), '').trim();
+      }
+
+      await SupabaseWeddingRepository.instance.sendChatMessage(
+        cleanResponse,
+        sender: 'assistant',
+      );
+    } catch (e) {
+      debugPrint('AI Assistant query error: $e');
+      await SupabaseWeddingRepository.instance.sendChatMessage(
+        "I'm sorry, I'm having trouble connecting to my servers right now. Please try again! 💕",
+        sender: 'assistant',
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isAssistantTyping = false;
+        });
+      }
+    }
+  }
+
   Future<void> _onSpecialAction(MessageType type) async {
     switch (type) {
       case MessageType.image:
@@ -401,36 +618,29 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
         await _sendLoveSignalFromChat();
         break;
       case MessageType.text:
+      case MessageType.voice:
         break;
     }
   }
 
-  // ── Real image upload: camera / gallery → compress → Supabase ─────────────
-
   Future<void> _sendImageMessage() async {
     if (!mounted) return;
 
-    // 1. Show camera vs gallery bottom-sheet
     final source = await _showImageSourceSheet();
     if (source == null) return;
 
-    // 2. Pick image
     final XFile? picked = await _picker.pickImage(
       source: source,
-      imageQuality: 90, // initial device-side quality reduction
+      imageQuality: 90,
       maxWidth: 1920,
       maxHeight: 1920,
     );
     if (picked == null || !mounted) return;
 
-    // 3. Read bytes + determine extension
     final rawBytes = await picked.readAsBytes();
     final originalExt = picked.name.split('.').last.toLowerCase();
-    // We always compress to JPEG for uniform MIME type handling
     const uploadExt = 'jpg';
 
-    // 4. Client-side compression: target 2 MB, keeps us well under the 25 MB
-    //    bucket limit while preserving good visible quality.
     setState(() {
       _uploadingImage = true;
       _uploadProgress = 0.1;
@@ -449,14 +659,12 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
       );
       compressedBytes = result;
     } catch (_) {
-      // Compression failed — use raw bytes (still <= 25 MB for phone photos)
       compressedBytes = rawBytes;
     }
 
     if (!mounted) return;
     setState(() => _uploadProgress = 0.4);
 
-    // 5. Upload to Supabase
     String? publicUrl;
     try {
       publicUrl = await SupabaseWeddingRepository.instance
@@ -480,29 +688,100 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
     if (!mounted) return;
     setState(() => _uploadProgress = 0.9);
 
-    // 6. Build & send rich message
+    final replyId = _replyingToMessage?.id;
+    final replySender = _replyingToMessage?.sender;
+    final replyText = _replyingToMessage?.message;
+
+    final tempId = '-temp_${DateTime.now().microsecondsSinceEpoch}';
     final msg = ChatMessage(
-      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      id: tempId,
       sender: PartnerIdentity.active.value.label,
       message: '',
       createdAt: DateTime.now(),
       status: MessageStatus.sent,
       messageType: MessageType.image,
       imageUrl: publicUrl,
+      replyToId: replyId,
+      replyToSender: replySender,
+      replyToText: replyText,
     );
 
     setState(() {
-      _pendingMessages.add(msg);
+      _replyingToMessage = null;
+      _optimisticMessages.add(msg);
       _uploadingImage = false;
       _uploadProgress = 0;
     });
 
+    _scrollToBottom();
+
     try {
       await SupabaseWeddingRepository.instance.sendRichMessage(msg);
-    } catch (_) {}
+    } catch (_) {
+      setState(() {
+        _failedMessageIds.add(tempId);
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to send image.')),
+        );
+      }
+    }
   }
 
-  /// Bottom sheet to choose Camera or Gallery.
+  Future<void> _sendVoiceMessage(String filePath) async {
+    final replyId = _replyingToMessage?.id;
+    final replySender = _replyingToMessage?.sender;
+    final replyText = _replyingToMessage?.message;
+
+    final tempId = '-temp_${DateTime.now().microsecondsSinceEpoch}';
+    final localMessage = ChatMessage(
+      id: tempId,
+      sender: PartnerIdentity.active.value.label,
+      message: '',
+      createdAt: DateTime.now(),
+      status: MessageStatus.sent,
+      messageType: MessageType.voice,
+      voiceUrl: filePath,
+      replyToId: replyId,
+      replyToSender: replySender,
+      replyToText: replyText,
+    );
+
+    setState(() {
+      _replyingToMessage = null;
+      _optimisticMessages.add(localMessage);
+    });
+
+    _scrollToBottom();
+
+    try {
+      final publicUrl = await SupabaseWeddingRepository.instance.uploadVoiceMessage(filePath);
+      
+      await SupabaseWeddingRepository.instance.sendChatMessage(
+        '',
+        replyToId: replyId,
+        replyToSender: replySender,
+        replyToText: replyText,
+        voiceUrl: publicUrl,
+      );
+
+      final file = File(filePath);
+      if (await file.exists()) {
+        await file.delete();
+      }
+    } catch (e) {
+      setState(() {
+        _failedMessageIds.add(tempId);
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to send voice message: $e')),
+        );
+      }
+    }
+  }
+
   Future<ImageSource?> _showImageSourceSheet() {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     return showModalBottomSheet<ImageSource>(
@@ -521,7 +800,6 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // ── Handle ───────────────────────────────────────────────────
             Container(
               width: 40,
               height: 4,
@@ -548,7 +826,6 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
               ),
             ),
             const SizedBox(height: 24),
-            // ── Camera ───────────────────────────────────────────────────
             _SourceTile(
               icon: Icons.camera_alt_rounded,
               label: 'Take a Photo',
@@ -558,7 +835,6 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
               onTap: () => Navigator.pop(ctx, ImageSource.camera),
             ),
             const SizedBox(height: 12),
-            // ── Gallery ──────────────────────────────────────────────────
             _SourceTile(
               icon: Icons.photo_library_rounded,
               label: 'Choose from Gallery',
@@ -574,12 +850,9 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
     );
   }
 
-  // ── Real location: geolocator + geocoding ──────────────────────────────────
-
   Future<void> _sendLocationMessage() async {
     if (!mounted) return;
 
-    // 1. Confirmation sheet
     final confirmed = await showModalBottomSheet<bool>(
       context: context,
       backgroundColor: Colors.transparent,
@@ -590,7 +863,6 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
     );
     if (confirmed != true || !mounted) return;
 
-    // 2. Check location permission
     LocationPermission permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
@@ -605,7 +877,6 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
       }
     }
 
-    // 3. Fetch current position
     Position position;
     try {
       position = await Geolocator.getCurrentPosition(
@@ -626,13 +897,11 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
     final lat = position.latitude;
     final lng = position.longitude;
 
-    // 4. Reverse-geocode to get a human-readable address
     String address = 'Sharing current location...';
     try {
       final placemarks = await placemarkFromCoordinates(lat, lng);
       if (placemarks.isNotEmpty) {
         final place = placemarks.first;
-        // Build a clean "Street, City, Province" string
         final parts = <String>[
           if ((place.thoroughfare ?? '').isNotEmpty) place.thoroughfare!,
           if ((place.locality ?? '').isNotEmpty) place.locality!,
@@ -644,49 +913,58 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
         }
       }
     } catch (_) {
-      // Geocoding failed — use lat/lng as fallback label
-      address =
-          '${lat.toStringAsFixed(5)}, ${lng.toStringAsFixed(5)}';
+      address = '${lat.toStringAsFixed(5)}, ${lng.toStringAsFixed(5)}';
     }
 
     if (!mounted) return;
 
-    // 5. Build and send the location message
+    final replyId = _replyingToMessage?.id;
+    final replySender = _replyingToMessage?.sender;
+    final replyText = _replyingToMessage?.message;
+
     final now = DateTime.now();
+    final tempId = '-temp_${now.microsecondsSinceEpoch}';
     final msg = ChatMessage(
-      id: now.microsecondsSinceEpoch.toString(),
+      id: tempId,
       sender: PartnerIdentity.active.value.label,
       message: address,
       createdAt: now,
       status: MessageStatus.sent,
       messageType: MessageType.location,
-      // payload: 'lat,lng,address'
       locationData: '$lat,$lng,$address',
+      replyToId: replyId,
+      replyToSender: replySender,
+      replyToText: replyText,
     );
 
-    setState(() => _pendingMessages.add(msg));
+    setState(() {
+      _replyingToMessage = null;
+      _optimisticMessages.add(msg);
+    });
+
+    _scrollToBottom();
 
     try {
       await SupabaseWeddingRepository.instance.sendRichMessage(msg);
-    } catch (_) {}
+    } catch (_) {
+      setState(() {
+        _failedMessageIds.add(tempId);
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to send location.')),
+        );
+      }
+    }
   }
 
-  /// Sends a love signal from the chat composer.
   Future<void> _sendLoveSignalFromChat() async {
     if (!mounted) return;
-    final msg = ChatMessage(
-      id: DateTime.now().microsecondsSinceEpoch.toString(),
-      sender: PartnerIdentity.active.value.label,
-      message: 'Sending love to you 💕',
-      createdAt: DateTime.now(),
-      status: MessageStatus.sent,
-      messageType: MessageType.love,
-    );
-    setState(() => _pendingMessages.add(msg));
-    try {
-      await SupabaseWeddingRepository.instance.sendRichMessage(msg);
-    } catch (_) {}
 
+    // Play tactile haptic feedback
+    HapticFeedback.heavyImpact();
+
+    // Trigger active visual overlay state immediately
     setState(() {
       _activeTrigger = const LoveTrigger(
         title: 'I Love You',
@@ -697,6 +975,48 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
         overlayTitle: '❤️ Love Signal',
       );
     });
+
+    // Start animation controller immediately
+    _lottieController.duration = const Duration(milliseconds: 4200);
+    _lottieController
+      ..reset()
+      ..forward();
+
+    final replyId = _replyingToMessage?.id;
+    final replySender = _replyingToMessage?.sender;
+    final replyText = _replyingToMessage?.message;
+
+    final tempId = '-temp_${DateTime.now().microsecondsSinceEpoch}';
+    final msg = ChatMessage(
+      id: tempId,
+      sender: PartnerIdentity.active.value.label,
+      message: 'Sending love to you 💕',
+      createdAt: DateTime.now(),
+      status: MessageStatus.sent,
+      messageType: MessageType.love,
+      replyToId: replyId,
+      replyToSender: replySender,
+      replyToText: replyText,
+    );
+    setState(() {
+      _replyingToMessage = null;
+      _optimisticMessages.add(msg);
+    });
+
+    _scrollToBottom();
+
+    try {
+      await SupabaseWeddingRepository.instance.sendRichMessage(msg);
+    } catch (_) {
+      setState(() {
+        _failedMessageIds.add(tempId);
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to send love signal.')),
+        );
+      }
+    }
   }
 
   // ── Notes ──────────────────────────────────────────────────────────────────
@@ -731,8 +1051,6 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
     final hasKeyboard = _lastHasKeyboardState;
 
     if (_wasKeyboardOpen && !hasKeyboard) {
-      // Keyboard was open, now closed (e.g. system back button pressed)
-      // Unfocus the chat input so tapping it again will request focus normally
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && _chatFocusNode.hasFocus) {
           _chatFocusNode.unfocus();
@@ -819,7 +1137,6 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
                   controller: _lottieController,
                 ),
         ),
-        // ── Image upload progress overlay ────────────────────────────────
         if (_uploadingImage)
           Positioned(
             left: 18,
@@ -879,26 +1196,28 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
 
               final base = snapshot.data ?? <ChatMessage>[];
 
-              // Mark messages as seen if there are unseen messages from partner and we are actively on the chat screen
-              if (AppNotificationNavigation.mainTabNotifier.value == 1 && _tab == 0 && base.isNotEmpty) {
-                final hasUnseen = base.any((m) =>
-                    m.sender.toLowerCase() != myLabel &&
-                    m.status != MessageStatus.seen);
-                if (hasUnseen) {
-                  Future.microtask(() =>
-                      SupabaseWeddingRepository.instance.markMessagesAsSeen());
+              // Bulk messages seen marking is removed in favor of ViewportIntersectionObserver.
+
+              final activeOptimistic = _optimisticMessages.where((opt) {
+                final isAlreadySaved = base.any((b) => _isOptimisticMatch(opt, b));
+                return !isAlreadySaved;
+              }).toList();
+
+              final allMessages = [
+                ...base,
+                ...activeOptimistic,
+              ];
+
+              final uniqueMessages = <ChatMessage>[];
+              for (final msg in allMessages) {
+                if (!uniqueMessages.any((x) => x.id == msg.id)) {
+                  uniqueMessages.add(msg);
                 }
               }
 
-              // Reverse list so newest are at index 0 (rendered at the bottom)
-              final messages = [
-                ...base,
-                ..._pendingMessages.where(
-                  (pending) => !base.any((item) => item.id == pending.id),
-                ),
-              ].reversed.toList();
+              uniqueMessages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
 
-              if (messages.isEmpty) {
+              if (uniqueMessages.isEmpty) {
                 return Center(
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -925,11 +1244,59 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
                 );
               }
 
-              // In reversed list, the latest user message is the first matching index we hit
-              int latestMineIndex = -1;
-              for (int i = 0; i < messages.length; i++) {
-                if (messages[i].sender.toLowerCase() == myLabel) {
-                  latestMineIndex = i;
+              // Find the oldest unread message from the partner
+              String? oldestUnreadPartnerMessageId;
+              for (final msg in uniqueMessages) {
+                if (msg.sender.toLowerCase() != myLabel &&
+                    msg.status != MessageStatus.seen) {
+                  oldestUnreadPartnerMessageId = msg.id;
+                  break;
+                }
+              }
+
+              final listItems = <dynamic>[];
+              DateTime? lastTimestamp;
+              bool unreadDividerInserted = false;
+
+              for (final msg in uniqueMessages) {
+                // Insert the unread messages divider exactly before the oldest unread message from the partner
+                if (!unreadDividerInserted && msg.id == oldestUnreadPartnerMessageId) {
+                  listItems.add('UNREAD_SEPARATOR');
+                  unreadDividerInserted = true;
+                }
+
+                final currentTimestamp = msg.createdAt;
+                bool showSeparator = false;
+                bool sameDay = false;
+
+                if (lastTimestamp == null) {
+                  showSeparator = true;
+                } else {
+                  final diff = currentTimestamp.difference(lastTimestamp).abs();
+                  final isSameDay = currentTimestamp.day == lastTimestamp.day &&
+                      currentTimestamp.month == lastTimestamp.month &&
+                      currentTimestamp.year == lastTimestamp.year;
+                  if (!isSameDay || diff.inMinutes > 20) {
+                    showSeparator = true;
+                    if (isSameDay) {
+                      sameDay = true;
+                    }
+                  }
+                }
+
+                if (showSeparator) {
+                  listItems.add(ChatSeparatorData(timestamp: currentTimestamp, showTimeOnly: sameDay));
+                }
+                listItems.add(msg);
+                lastTimestamp = currentTimestamp;
+              }
+
+              final renderedItems = listItems.reversed.toList();
+
+              String? latestMineId;
+              for (int i = uniqueMessages.length - 1; i >= 0; i--) {
+                if (uniqueMessages[i].sender.toLowerCase() == myLabel) {
+                  latestMineId = uniqueMessages[i].id;
                   break;
                 }
               }
@@ -943,20 +1310,64 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
                   isLoading: _isRefreshingChat,
                   child: ListView.builder(
                     controller: _scrollController,
-                    reverse: true, // Naturally pushes upward when keyboard appears
+                    reverse: true,
                     physics: const AlwaysScrollableScrollPhysics(),
                     padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-                    itemCount: messages.length,
+                    itemCount: renderedItems.length,
                     itemBuilder: (context, index) {
-                      final msg = messages[index];
-                      final isLatestFromMe = index == latestMineIndex &&
+                      final item = renderedItems[index];
+                      if (item is ChatSeparatorData) {
+                        return ChatDateSeparator(
+                          date: item.timestamp,
+                          showTimeOnly: item.showTimeOnly,
+                          isDark: isDark,
+                        );
+                      }
+                      if (item == 'UNREAD_SEPARATOR') {
+                        return UnreadMessagesDivider(isDark: isDark);
+                      }
+
+                      final msg = item as ChatMessage;
+                      final isLatestFromMe = msg.id == latestMineId &&
                           msg.sender.toLowerCase() == myLabel;
-                      return ChatBubble(
+                      final isSendingError = _failedMessageIds.contains(msg.id);
+
+                      final bubble = ChatBubble(
                         message: msg,
                         isLatestFromMe: isLatestFromMe,
-                        // Pass partner's avatar for the 'seen' receipt indicator
                         partnerAvatarUrl: _partnerAvatarUrl,
+                        myAvatarUrl: _myAvatarUrl,
+                        isSendingError: isSendingError,
+                        onTapError: () => _retryMessage(msg),
+                        onReply: (repliedMsg) {
+                          setState(() {
+                            _replyingToMessage = repliedMsg;
+                          });
+                          _chatFocusNode.requestFocus();
+                        },
+                        onEditRequested: (editingMsg) {
+                          setState(() {
+                            _editingMessage = editingMsg;
+                            _chatController.text = editingMsg.message;
+                            _replyingToMessage = null; // cancel reply if editing
+                          });
+                          _chatFocusNode.requestFocus();
+                        },
                       );
+
+                      final isSpouse = msg.sender.toLowerCase() != myLabel;
+                      final isUnread = isSpouse && msg.status != MessageStatus.seen;
+
+                      if (isUnread) {
+                        return ViewportIntersectionObserver(
+                          scrollController: _scrollController,
+                          onEnteringViewport: () {
+                            unawaited(NotificationService.markMessageAsSeen(msg.id, type: 'chat'));
+                          },
+                          child: bubble,
+                        );
+                      }
+                      return bubble;
                     },
                   ),
                 ),
@@ -965,12 +1376,14 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
           ),
         ),
         ChatTypingIndicator(
-          isTyping: _isPartnerTyping,
+          isTyping: _isPartnerTyping || _isAssistantTyping,
           isDark: isDark,
-          partnerName: PartnerIdentity.active.value == PartnerProfile.rodel
-              ? 'Eurine'
-              : 'Rodel',
+          partnerName: _isAssistantTyping
+              ? 'AI Assistant'
+              : (PartnerIdentity.active.value == PartnerProfile.rodel ? 'Eurine' : 'Rodel'),
         ),
+        if (_showAssistantSuggestion)
+          _buildAssistantSuggestionOverlay(isDark),
         ChatComposer(
           controller: _chatController,
           sending: _sendingChat,
@@ -979,8 +1392,79 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
           onChanged: _onChatInputChanged,
           focusNode: _chatFocusNode,
           hasKeyboard: hasKeyboard,
+          replyToMessage: _replyingToMessage,
+          onCancelReply: () {
+            setState(() {
+              _replyingToMessage = null;
+            });
+          },
+          editingMessage: _editingMessage,
+          onCancelEdit: () {
+            setState(() {
+              _editingMessage = null;
+              _chatController.clear();
+            });
+          },
+          onVoiceRecorded: _sendVoiceMessage,
         ),
       ],
+    );
+  }
+
+  Widget _buildAssistantSuggestionOverlay(bool isDark) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 18, vertical: 4),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: isDark ? RodMaeColors.navy : Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: RodMaeColors.sky.withValues(alpha: 0.25),
+        ),
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black26,
+            blurRadius: 8,
+            offset: Offset(0, -2),
+          ),
+        ],
+      ),
+      child: ListTile(
+        leading: CircleAvatar(
+          backgroundColor: RodMaeColors.sky.withValues(alpha: 0.15),
+          child: const Icon(Icons.psychology_rounded, color: RodMaeColors.sky),
+        ),
+        title: Text(
+          '@assistant (AI)',
+          style: GoogleFonts.inter(
+            color: isDark ? Colors.white : RodMaeColors.lightText,
+            fontWeight: FontWeight.w700,
+            fontSize: 13,
+          ),
+        ),
+        subtitle: Text(
+          'Tap to ask AI Assistant',
+          style: GoogleFonts.inter(
+            color: isDark ? Colors.white54 : Colors.black54,
+            fontSize: 11,
+          ),
+        ),
+        trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 14, color: Colors.grey),
+        onTap: () {
+          setState(() {
+            _showAssistantSuggestion = false;
+            final currentText = _chatController.text;
+            if (currentText.endsWith('@')) {
+              _chatController.text = '${currentText.substring(0, currentText.length - 1)}@assistant ';
+            } else {
+              _chatController.text = '$currentText@assistant ';
+            }
+            _chatController.selection = TextSelection.fromPosition(
+              TextPosition(offset: _chatController.text.length),
+            );
+          });
+        },
+      ),
     );
   }
 
@@ -989,7 +1473,6 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
   Widget _buildNotesTab(bool isDark) {
     return Column(
       children: [
-        // Composing Box
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
           child: GlassCard(
@@ -1069,7 +1552,6 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
             ),
           ),
         ),
-        // History List
         Expanded(
           child: StreamBuilder<List<SurpriseNote>>(
             stream: _notesStream,
@@ -1140,10 +1622,8 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
                                 mainAxisAlignment:
                                     MainAxisAlignment.spaceBetween,
                                 children: [
-                                  // ── Sender PFP + name ─────────────────
                                   Row(
                                     children: [
-                                      // Real profile picture
                                       _SenderAvatar(
                                         avatarUrl: senderAvatarUrl,
                                         initial: note.sender.isNotEmpty
@@ -1167,9 +1647,8 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
                                       ),
                                     ],
                                   ),
-                                  // ── Timestamp ─────────────────────────
                                   Text(
-                                    Formatters.dateTime(note.createdAt),
+                                    TimeUtils.formatDateTimeFromDateTime(note.createdAt),
                                     style: GoogleFonts.robotoMono(
                                       color: isDark
                                           ? Colors.white30
@@ -1233,7 +1712,6 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
 
         final signals = snapshot.data ?? <LoveTriggerEvent>[];
 
-        // Mark signals as seen if there are unseen signals from partner and we are actively on the signals tab
         if (AppNotificationNavigation.mainTabNotifier.value == 1 && _tab == 2 && signals.isNotEmpty) {
           final myLabel = PartnerIdentity.active.value.label.toLowerCase();
           final hasUnseen = signals.any((s) =>
@@ -1331,7 +1809,6 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
                         const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                     child: Row(
                       children: [
-                        // ── Sender PFP ────────────────────────────────────
                         _SenderAvatar(
                           avatarUrl: senderAvatarUrl,
                           initial: sig.sender.isNotEmpty ? sig.sender[0] : '?',
@@ -1339,7 +1816,6 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
                           radius: 18,
                         ),
                         const SizedBox(width: 12),
-                        // ── Signal icon ───────────────────────────────────
                         Container(
                           width: 36,
                           height: 36,
@@ -1366,9 +1842,9 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
                               ),
                               const SizedBox(height: 3),
                               Text(
-                                Formatters.dateTime(sig.createdAt),
+                                TimeUtils.formatDateTimeFromDateTime(sig.createdAt),
                                 style: GoogleFonts.robotoMono(
-                                  color: isDark ? Colors.white30 : Colors.black38,
+                                  color: isDark ? Colors.white38 : Colors.black38,
                                   fontSize: 9,
                                 ),
                               ),
@@ -1441,10 +1917,6 @@ class ChatTypingIndicator extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Sender Avatar — real PFP via CachedNetworkImage with initial-letter fallback
-// ─────────────────────────────────────────────────────────────────────────────
-
 class _SenderAvatar extends StatelessWidget {
   final String? avatarUrl;
   final String initial;
@@ -1487,10 +1959,6 @@ class _SenderAvatar extends StatelessWidget {
         ),
       );
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Image upload progress banner
-// ─────────────────────────────────────────────────────────────────────────────
 
 class _ImageUploadBanner extends StatelessWidget {
   final double progress;
@@ -1548,10 +2016,6 @@ class _ImageUploadBanner extends StatelessWidget {
     );
   }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Image source selection tile
-// ─────────────────────────────────────────────────────────────────────────────
 
 class _SourceTile extends StatelessWidget {
   final IconData icon;
@@ -1625,10 +2089,6 @@ class _SourceTile extends StatelessWidget {
     );
   }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Location confirm bottom sheet
-// ─────────────────────────────────────────────────────────────────────────────
 
 class _LocationConfirmSheet extends StatelessWidget {
   final VoidCallback onConfirm;
@@ -1729,10 +2189,6 @@ class _LocationConfirmSheet extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Typing Dots Animation
-// ─────────────────────────────────────────────────────────────────────────────
-
 class _TypingDotsAnimation extends StatefulWidget {
   final bool isDark;
   const _TypingDotsAnimation({required this.isDark});
@@ -1787,5 +2243,235 @@ class _TypingDotsAnimationState extends State<_TypingDotsAnimation>
         );
       }),
     );
+  }
+}
+
+class ChatSeparatorData {
+  final DateTime timestamp;
+  final bool showTimeOnly;
+  const ChatSeparatorData({required this.timestamp, required this.showTimeOnly});
+}
+
+class ChatDateSeparator extends StatelessWidget {
+  final DateTime date;
+  final bool showTimeOnly;
+  final bool isDark;
+
+  const ChatDateSeparator({
+    required this.date,
+    this.showTimeOnly = false,
+    required this.isDark,
+    super.key,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final text = showTimeOnly
+        ? TimeUtils.formatChatTimeFromDateTime(date)
+        : TimeUtils.formatDateSeparatorFromDateTime(date);
+
+    final lineColor = isDark ? Colors.white10 : Colors.black12;
+
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 16),
+        child: Row(
+          children: [
+            Expanded(
+              child: Container(
+                height: 1,
+                color: lineColor,
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Text(
+                text,
+                style: GoogleFonts.inter(
+                  color: isDark ? Colors.white38 : Colors.black45,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ),
+            Expanded(
+              child: Container(
+                height: 1,
+                color: lineColor,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class UnreadMessagesDivider extends StatelessWidget {
+  final bool isDark;
+
+  const UnreadMessagesDivider({required this.isDark, super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final lineColor = isDark 
+        ? const Color(0xFFEF4444).withValues(alpha: 0.5) 
+        : const Color(0xFFEF4444).withValues(alpha: 0.3);
+    final textColor = isDark 
+        ? const Color(0xFFFCA5A5) 
+        : const Color(0xFFB91C1C);
+
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 16),
+        child: Row(
+          children: [
+            Expanded(
+              child: Container(
+                height: 1,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [lineColor.withValues(alpha: 0.0), lineColor],
+                    begin: Alignment.centerLeft,
+                    end: Alignment.centerRight,
+                  ),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Text(
+                'Unread messages',
+                style: GoogleFonts.inter(
+                  color: textColor,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ),
+            Expanded(
+              child: Container(
+                height: 1,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [lineColor, lineColor.withValues(alpha: 0.0)],
+                    begin: Alignment.centerLeft,
+                    end: Alignment.centerRight,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class ViewportIntersectionObserver extends StatefulWidget {
+  final Widget child;
+  final ScrollController scrollController;
+  final VoidCallback onEnteringViewport;
+
+  const ViewportIntersectionObserver({
+    required this.child,
+    required this.scrollController,
+    required this.onEnteringViewport,
+    super.key,
+  });
+
+  @override
+  State<ViewportIntersectionObserver> createState() => _ViewportIntersectionObserverState();
+}
+
+class _ViewportIntersectionObserverState extends State<ViewportIntersectionObserver> {
+  bool _hasTriggered = false;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.scrollController.addListener(_checkVisibility);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _checkVisibility());
+  }
+
+  @override
+  void dispose() {
+    widget.scrollController.removeListener(_checkVisibility);
+    super.dispose();
+  }
+
+  void _checkVisibility() {
+    if (!mounted || _hasTriggered) return;
+
+    final context = this.context;
+    final renderBox = context.findRenderObject() as RenderBox?;
+    if (renderBox == null || !renderBox.hasSize) return;
+
+    final position = renderBox.localToGlobal(Offset.zero);
+    final viewportHeight = MediaQuery.sizeOf(context).height;
+
+    final height = renderBox.size.height;
+    final top = position.dy;
+    final bottom = position.dy + height;
+
+    final isVisible = (top >= 0 && top <= viewportHeight) || 
+                      (bottom >= 0 && bottom <= viewportHeight) ||
+                      (top < 0 && bottom > viewportHeight);
+
+    if (isVisible) {
+      _hasTriggered = true;
+      widget.scrollController.removeListener(_checkVisibility);
+      widget.onEnteringViewport();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return widget.child;
+  }
+}
+
+class MentionTextEditingController extends TextEditingController {
+  @override
+  TextSpan buildTextSpan({
+    required BuildContext context,
+    TextStyle? style,
+    required bool withComposing,
+  }) {
+    final text = this.text;
+    final List<TextSpan> children = [];
+    
+    final regex = RegExp(r'@assistant\b', caseSensitive: false);
+    
+    int lastIndex = 0;
+    for (final match in regex.allMatches(text)) {
+      if (match.start > lastIndex) {
+        children.add(TextSpan(
+          text: text.substring(lastIndex, match.start),
+        ));
+      }
+      
+      final matchedText = match.group(0)!;
+      children.add(TextSpan(
+        text: matchedText,
+        style: const TextStyle(
+          color: Color(0xFF10B981),
+          fontWeight: FontWeight.bold,
+          backgroundColor: Color(0x2610B981),
+        ),
+      ));
+      
+      lastIndex = match.end;
+    }
+    
+    if (lastIndex < text.length) {
+      children.add(TextSpan(
+        text: text.substring(lastIndex),
+      ));
+    }
+    
+    return TextSpan(children: children, style: style);
   }
 }

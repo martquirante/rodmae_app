@@ -7,6 +7,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../core/constants.dart';
 import '../core/theme.dart';
@@ -272,7 +273,11 @@ final class NotificationService {
         provisional: false,
       );
 
-      // 2. Request Android local notification permission
+      // 2. Request Android 13+ runtime POST_NOTIFICATIONS permission
+      final status = await Permission.notification.request();
+      debugPrint('NotificationService: permission_handler status: $status');
+
+      // 3. Request Android local notification permission
       final androidPlugin = instance.flutterLocalNotificationsPlugin
           .resolvePlatformSpecificImplementation<
               AndroidFlutterLocalNotificationsPlugin>();

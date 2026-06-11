@@ -74,6 +74,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   LatLng? _myLocation;
   LatLng? _spouseLocation;
   LatLng? _homeLocation;
+  bool _isCurrentlyAtHome = false;
   LatLng? _myWorkLocation;
   LatLng? _spouseWorkLocation;
 
@@ -86,6 +87,8 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   List<LatLng> _routePoints = [];
   double _routeDistanceKm = 0.0;
   double _routeDurationMin = 0.0;
+  String _routeDestinationTitle = 'HOME';
+  LatLng? _routeDestinationLatLng;
 
   // Real-time location streams
   StreamSubscription<Position>? _positionStreamSub;
@@ -196,6 +199,15 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     });
   }
 
+  void _updateProximityState() {
+    if (_myLocation == null || _homeLocation == null) {
+      _isCurrentlyAtHome = false;
+      return;
+    }
+    final double dist = const Distance().as(LengthUnit.Meter, _myLocation!, _homeLocation!);
+    _isCurrentlyAtHome = dist <= 30.0;
+  }
+
   Future<void> _loadUserAvatars() async {
     final me = PartnerIdentity.active.value.label;
     final spouse = PartnerIdentity.active.value == PartnerProfile.rodel
@@ -292,7 +304,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         final target = LatLng(widget.focusLat!, widget.focusLng!);
-        _mapController.move(target, 16.0);
+        _mapController.move(target, 17.0);
         // Mark a search pin so the user sees a visible marker
         setState(() => _searchPin = target);
         // Show a dismissible snackbar with the address
@@ -329,7 +341,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     if (widget.autoHeadingHome) {
       Future.delayed(const Duration(seconds: 3), () {
         if (mounted && _myLocation != null && _homeLocation != null) {
-          _fetchRoute(_myLocation!, _homeLocation!).then((_) {
+          _fetchRoute(_myLocation!, _homeLocation!, 'HOME').then((_) {
             if (mounted) _showTransitSelectionBottomSheet();
           });
         } else if (mounted) {
@@ -390,7 +402,10 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         ),
       );
       final latLng = LatLng(pos.latitude, pos.longitude);
-      setState(() => _myLocation = latLng);
+      setState(() {
+        _myLocation = latLng;
+        _updateProximityState();
+      });
       
       // Infer transit mode based on speed
       TransitMode inferredMode = TransitMode.walking;
@@ -404,7 +419,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       }
       _myLocationController?.updatePosition(latLng, newMode: inferredMode);
       
-      _mapController.move(latLng, 14.5);
+      _mapController.move(latLng, 17.0);
       
       // Upsert live location to database
       _updateLiveLocationInDatabase(latLng);
@@ -419,7 +434,10 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     ).listen((pos) {
       final latLng = LatLng(pos.latitude, pos.longitude);
       if (mounted) {
-        setState(() => _myLocation = latLng);
+        setState(() {
+          _myLocation = latLng;
+          _updateProximityState();
+        });
         
         // Infer transit mode based on speed
         TransitMode inferredMode = TransitMode.walking;
@@ -487,6 +505,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         if (newHomeName != null) _homeLocationName = newHomeName;
         if (newMyWorkName != null) _myWorkLocationName = newMyWorkName;
         if (newSpouseWorkName != null) _spouseWorkLocationName = newSpouseWorkName;
+        _updateProximityState();
       });
 
       // Animate spouse to new DB position (broadcast may have already handled it)
@@ -646,7 +665,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   }
 
   // OSRM snapped-to-road routing
-  Future<void> _fetchRoute(LatLng start, LatLng end) async {
+  Future<void> _fetchRoute(LatLng start, LatLng end, String destinationTitle) async {
     final url = Uri.parse(
       'http://router.project-osrm.org/route/v1/driving/'
       '${start.longitude},${start.latitude};${end.longitude},${end.latitude}'
@@ -676,6 +695,8 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
             _routePoints = points;
             _routeDistanceKm = distance;
             _routeDurationMin = duration;
+            _routeDestinationTitle = destinationTitle;
+            _routeDestinationLatLng = end;
           });
 
           // Move camera to fit route
@@ -726,9 +747,10 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       PartnerIdentity.setFromEmail(user.email);
     }
 
-    // Trigger love signal to other spouse
+    // Trigger love signal to other spouse dynamically
+    final triggerName = _routeDestinationTitle == 'OFFICE' ? 'Miss You' : 'Heading Home';
     SupabaseWeddingRepository.instance
-        .insertLoveTrigger('Heading Home')
+        .insertLoveTrigger(triggerName)
         .catchError((_) {});
 
     _transitSimController?.dispose();
@@ -767,12 +789,15 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           _simulatedVehiclePosition = null;
         });
         
-        // Update database with final home location arrival
-        if (_homeLocation != null) {
-          _updateLiveLocationInDatabase(_homeLocation!).catchError((_) {});
+        // Update database with final location arrival
+        if (_routeDestinationLatLng != null) {
+          _updateLiveLocationInDatabase(_routeDestinationLatLng!).catchError((_) {});
         }
         
-        _showSuccessSnackBar('You have arrived home safely! ❤️');
+        final arrivalMsg = _routeDestinationTitle == 'OFFICE'
+            ? 'You have arrived at the office safely! 💼'
+            : 'You have arrived home safely! ❤️';
+        _showSuccessSnackBar(arrivalMsg);
       } else {
         // Interpolate along route points
         final newPos = _interpolateRoutePosition(val);
@@ -830,6 +855,10 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     
+    final bool isSpouseAtHome = (_spouseLocation != null && _homeLocation != null)
+        ? const Distance().as(LengthUnit.Meter, _spouseLocation!, _homeLocation!) <= 30.0
+        : false;
+    
     // ── Build markers ────────────────────────────────────────────────────
     final markers = <Marker>[];
 
@@ -860,6 +889,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                   avatarUrl: _myAvatarUrl,
                   initials: myName.substring(0, 1),
                   isMe: true,
+                  showHomeHighlight: _isCurrentlyAtHome,
                 ),
         ),
       );
@@ -889,6 +919,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                   initials: spouseName.substring(0, 1),
                   lastSeenLabel:
                       _spouseLastSeen != null ? _timeAgo(_spouseLastSeen!) : null,
+                  showHomeHighlight: isSpouseAtHome,
                 ),
         ),
       );
@@ -1003,7 +1034,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
             mapController: _mapController,
             options: MapOptions(
               initialCenter: _myLocation ?? const LatLng(14.5547, 121.0244),
-              initialZoom: 13.5,
+              initialZoom: 17.0,
               maxZoom: 18.0,
               minZoom: 4.0,
               onTap: (tapPosition, point) {
@@ -1255,13 +1286,57 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                   ],
                 ),
                 const SizedBox(height: 12),
+
+                // Zoom In/Out vertical button group (Google Maps style)
+                Container(
+                  decoration: BoxDecoration(
+                    color: isDark ? RodMaeColors.navy.withValues(alpha: 0.90) : Colors.white,
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: Colors.white.withValues(alpha: isDark ? 0.08 : 0.2),
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.15),
+                        blurRadius: 8,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    children: [
+                      IconButton(
+                        icon: Icon(Icons.add_rounded, color: isDark ? Colors.white70 : RodMaeColors.lightText),
+                        onPressed: () {
+                          final currentZoom = _mapController.camera.zoom;
+                          _mapController.move(_mapController.camera.center, (currentZoom + 1.0).clamp(4.0, 18.0));
+                        },
+                        tooltip: 'Zoom In',
+                      ),
+                      Container(
+                        width: 24,
+                        height: 1,
+                        color: isDark ? Colors.white12 : Colors.black12,
+                      ),
+                      IconButton(
+                        icon: Icon(Icons.remove_rounded, color: isDark ? Colors.white70 : RodMaeColors.lightText),
+                        onPressed: () {
+                          final currentZoom = _mapController.camera.zoom;
+                          _mapController.move(_mapController.camera.center, (currentZoom - 1.0).clamp(4.0, 18.0));
+                        },
+                        tooltip: 'Zoom Out',
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
                 
-                // Recenter GPS Button
+                // Recenter GPS Button (My Location FAB)
                 _buildFloatingActionButton(
                   icon: Icons.my_location_rounded,
                   onPressed: () {
                     if (_myLocation != null) {
-                      _mapController.move(_myLocation!, 15.0);
+                      _mapController.move(_myLocation!, 17.0);
                     }
                   },
                   isDark: isDark,
@@ -1294,7 +1369,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                   icon: Icons.person_pin_circle_rounded,
                   onPressed: () {
                     if (_myLocation != null) {
-                      _mapController.move(_myLocation!, 15.5);
+                      _mapController.move(_myLocation!, 17.0);
                     }
                   },
                   isDark: isDark,
@@ -1306,7 +1381,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                   icon: Icons.people_rounded,
                   onPressed: () {
                     if (_spouseLocation != null) {
-                      _mapController.move(_spouseLocation!, 15.5);
+                      _mapController.move(_spouseLocation!, 17.0);
                     } else {
                       _showErrorSnackBar('Spouse location not available yet.');
                     }
@@ -1456,35 +1531,78 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           if (_routePoints.isEmpty && !_isPinningMode)
             Positioned(
               left: 24,
+              right: 24,
               bottom: 24,
-              child: ElevatedButton.icon(
-                onPressed: () {
-                  // Resolve user from Auth first to ensure correct active user state
-                  final user = AuthService.instance.currentUser;
-                  if (user != null) {
-                    PartnerIdentity.setFromEmail(user.email);
-                  }
-                  if (_myLocation != null && _homeLocation != null) {
-                    _fetchRoute(_myLocation!, _homeLocation!);
-                  } else {
-                    _showErrorSnackBar('Current location or Home address is not set yet.');
-                  }
-                },
-                icon: const Icon(Icons.navigation_rounded, color: RodMaeColors.navy, size: 18),
-                label: Text(
-                  'HEADING HOME',
-                  style: GoogleFonts.inter(
-                    color: RodMaeColors.navy,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 1.1,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: () {
+                        final user = AuthService.instance.currentUser;
+                        if (user != null) {
+                          PartnerIdentity.setFromEmail(user.email);
+                        }
+                        if (_myLocation != null && _homeLocation != null) {
+                          _fetchRoute(_myLocation!, _homeLocation!, 'HOME').then((_) {
+                            if (mounted) _showTransitSelectionBottomSheet();
+                          });
+                        } else {
+                          _showErrorSnackBar('Current location or Home address is not set yet.');
+                        }
+                      },
+                      icon: const Icon(Icons.home_rounded, color: RodMaeColors.navy, size: 18),
+                      label: Text(
+                        'HEADING HOME',
+                        style: GoogleFonts.inter(
+                          color: RodMaeColors.navy,
+                          fontWeight: FontWeight.w900,
+                          fontSize: 11,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: RodMaeColors.gold,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                        elevation: 8,
+                      ),
+                    ),
                   ),
-                ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: RodMaeColors.gold,
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-                  elevation: 8,
-                ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: () {
+                        final user = AuthService.instance.currentUser;
+                        if (user != null) {
+                          PartnerIdentity.setFromEmail(user.email);
+                        }
+                        if (_myLocation != null && _myWorkLocation != null) {
+                          _fetchRoute(_myLocation!, _myWorkLocation!, 'OFFICE').then((_) {
+                            if (mounted) _showTransitSelectionBottomSheet();
+                          });
+                        } else {
+                          _showErrorSnackBar('Current location or Work address is not set yet.');
+                        }
+                      },
+                      icon: const Icon(Icons.work_rounded, color: RodMaeColors.navy, size: 18),
+                      label: Text(
+                        'GO TO OFFICE',
+                        style: GoogleFonts.inter(
+                          color: RodMaeColors.navy,
+                          fontWeight: FontWeight.w900,
+                          fontSize: 11,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: RodMaeColors.gold,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                        elevation: 8,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
                    // 6. Pinning Mode Bottom Panel

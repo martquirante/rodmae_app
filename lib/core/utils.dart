@@ -39,6 +39,43 @@ final class Formatters {
     return '$hour:$minute $suffix';
   }
 
+  static String chatDateSeparator(DateTime dt) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final yesterday = today.subtract(const Duration(days: 1));
+    final messageDate = DateTime(dt.year, dt.month, dt.day);
+
+    final hour = dt.hour == 0
+        ? 12
+        : dt.hour > 12
+            ? dt.hour - 12
+            : dt.hour;
+    final minute = dt.minute.toString().padLeft(2, '0');
+    final suffix = dt.hour >= 12 ? 'PM' : 'AM';
+    final timeStr = '$hour:$minute $suffix';
+
+    if (messageDate == today) {
+      return 'Today • $timeStr';
+    } else if (messageDate == yesterday) {
+      return 'Yesterday • $timeStr';
+    } else {
+      const weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+      final weekday = weekdays[dt.weekday - 1];
+      
+      const months = [
+        'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+      ];
+      final month = months[dt.month - 1];
+      
+      if (dt.year == now.year) {
+        return '$weekday, $month ${dt.day} • $timeStr';
+      } else {
+        return '$weekday, $month ${dt.day}, ${dt.year} • $timeStr';
+      }
+    }
+  }
+
   /// Returns a human-readable "Jun 9 • 4:23 PM" style stamp.
   static String dateTime(DateTime dt) {
     const months = [

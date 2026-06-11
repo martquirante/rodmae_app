@@ -73,6 +73,15 @@ final class AuthService {
       _cachedEmail = prefs.getString('auth_email');
       if (_cachedEmail != null) {
         PartnerIdentity.setFromEmail(_cachedEmail);
+
+        // Perform silent Supabase login if email matches dev bypass
+        final email = _cachedEmail!.toLowerCase().trim();
+        if (email == 'rodel@rodmae.com' || email == 'marymae@rodmae.com') {
+          AuthService.instance.signIn(email: email, password: 'rodmae2026').catchError((err) {
+            // ignore: avoid_print
+            print('Silent Supabase login failed: $err');
+          });
+        }
       }
     } catch (_) {}
   }
@@ -82,28 +91,54 @@ final class AuthService {
     required String password,
   }) async {
     final lowerEmail = email.toLowerCase().trim();
-    
-    // Dev-Mode Bypass Credentials for quick testing
-    if ((lowerEmail == 'rodel@rodmae.com' || lowerEmail == 'marymae@rodmae.com') &&
-        password == 'rodmae2026') {
-      PartnerIdentity.setFromEmail(lowerEmail);
-      _cachedEmail = lowerEmail;
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('auth_email', lowerEmail);
-      return; // Bypassed successfully
-    }
-    
-    // Otherwise fallback to live Supabase Auth
-    final response = await _client.auth.signInWithPassword(
-      email: email,
-      password: password,
-    );
-    if (response.user != null) {
-      final userEmail = response.user!.email ?? lowerEmail;
-      PartnerIdentity.setFromEmail(userEmail);
-      _cachedEmail = userEmail;
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('auth_email', userEmail);
+    final isDevCreds = (lowerEmail == 'rodel@rodmae.com' || lowerEmail == 'marymae@rodmae.com') &&
+        password == 'rodmae2026';
+
+    try {
+      // 1. Try real Supabase auth
+      final response = await _client.auth.signInWithPassword(
+        email: lowerEmail,
+        password: password,
+      );
+      if (response.user != null) {
+        final userEmail = response.user!.email ?? lowerEmail;
+        PartnerIdentity.setFromEmail(userEmail);
+        _cachedEmail = userEmail;
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('auth_email', userEmail);
+        return;
+      }
+    } catch (e) {
+      // If sign-in fails and it's dev credentials, try to sign up in Supabase
+      if (isDevCreds) {
+        try {
+          final signUpResponse = await _client.auth.signUp(
+            email: lowerEmail,
+            password: password,
+          );
+          if (signUpResponse.user != null) {
+            final userEmail = signUpResponse.user!.email ?? lowerEmail;
+            PartnerIdentity.setFromEmail(userEmail);
+            _cachedEmail = userEmail;
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setString('auth_email', userEmail);
+            return;
+          }
+        } catch (signUpError) {
+          // ignore: avoid_print
+          print('Supabase sign up error: $signUpError');
+        }
+
+        // Local bypass fallback if signup fails
+        PartnerIdentity.setFromEmail(lowerEmail);
+        _cachedEmail = lowerEmail;
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('auth_email', lowerEmail);
+        return;
+      }
+
+      // If not dev credentials, rethrow the signIn error
+      rethrow;
     }
   }
 

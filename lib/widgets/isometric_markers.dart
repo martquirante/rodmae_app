@@ -699,6 +699,7 @@ class PersonGameMarker extends StatefulWidget {
   final bool isMe;
   final String? initials;
   final String? lastSeenLabel;
+  final bool showHomeHighlight;
 
   const PersonGameMarker({
     required this.name,
@@ -708,6 +709,7 @@ class PersonGameMarker extends StatefulWidget {
     this.isMe = false,
     this.initials,
     this.lastSeenLabel,
+    this.showHomeHighlight = false,
     super.key,
   });
 
@@ -758,6 +760,29 @@ class _PersonGameMarkerState extends State<PersonGameMarker>
                 alignment: Alignment.center,
                 clipBehavior: Clip.none,
                 children: [
+                  // Dynamic expanding accuracy circle (Google Maps style)
+                  AnimatedBuilder(
+                    animation: _ctrl,
+                    builder: (context, child) {
+                      final scale = 1.0 + _ctrl.value * 1.5;
+                      final opacity = (0.32 * (1.0 - _ctrl.value)).clamp(0.0, 1.0);
+                      return Transform.scale(
+                        scale: scale,
+                        child: Container(
+                          width: 80,
+                          height: 80,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: widget.markerColor.withValues(alpha: opacity * 0.2),
+                            border: Border.all(
+                              color: widget.markerColor.withValues(alpha: opacity * 0.5),
+                              width: 1.5,
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
                   // Outer glow halo
                   Container(
                     width: 68,
@@ -766,10 +791,10 @@ class _PersonGameMarkerState extends State<PersonGameMarker>
                       shape: BoxShape.circle,
                       boxShadow: [
                         BoxShadow(
-                          color: widget.markerColor
-                              .withValues(alpha: 0.38 + pulse * 0.22),
-                          blurRadius: 20 + pulse * 8,
-                          spreadRadius: 2,
+                          color: (widget.showHomeHighlight ? const Color(0xFF4ADE80) : widget.markerColor)
+                              .withValues(alpha: widget.showHomeHighlight ? (0.50 + pulse * 0.30) : (0.38 + pulse * 0.22)),
+                          blurRadius: widget.showHomeHighlight ? (24 + pulse * 10) : (20 + pulse * 8),
+                          spreadRadius: widget.showHomeHighlight ? (4 + pulse * 2) : 2,
                         ),
                       ],
                     ),
@@ -781,9 +806,9 @@ class _PersonGameMarkerState extends State<PersonGameMarker>
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       border: Border.all(
-                        color: widget.markerColor
-                            .withValues(alpha: 0.30 + pulse * 0.42),
-                        width: 2.5,
+                        color: (widget.showHomeHighlight ? const Color(0xFF4ADE80) : widget.markerColor)
+                            .withValues(alpha: widget.showHomeHighlight ? (0.45 + pulse * 0.45) : (0.30 + pulse * 0.42)),
+                        width: widget.showHomeHighlight ? 3.5 : 2.5,
                       ),
                     ),
                   ),
@@ -793,7 +818,7 @@ class _PersonGameMarkerState extends State<PersonGameMarker>
                     height: 58,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      color: widget.markerColor.withValues(alpha: 0.10),
+                      color: (widget.showHomeHighlight ? const Color(0xFF4ADE80) : widget.markerColor).withValues(alpha: 0.10),
                     ),
                   ),
                   // Avatar circle
@@ -803,13 +828,23 @@ class _PersonGameMarkerState extends State<PersonGameMarker>
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       color: widget.markerColor,
-                      border: Border.all(color: Colors.white, width: 2.5),
+                      border: Border.all(
+                        color: widget.showHomeHighlight ? const Color(0xFF4ADE80) : Colors.white,
+                        width: widget.showHomeHighlight ? 4.0 : 2.5,
+                      ),
                       boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.45),
-                          blurRadius: 10,
-                          offset: const Offset(0, 4),
-                        ),
+                        if (widget.showHomeHighlight)
+                          BoxShadow(
+                            color: const Color(0xFF4ADE80).withValues(alpha: 0.6 + pulse * 0.4),
+                            blurRadius: 12 + pulse * 6,
+                            spreadRadius: 3 + pulse * 2,
+                          )
+                        else
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.45),
+                            blurRadius: 10,
+                            offset: const Offset(0, 4),
+                          ),
                       ],
                       image: widget.avatarUrl != null
                           ? DecorationImage(

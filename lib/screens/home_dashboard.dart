@@ -9,6 +9,7 @@ import 'package:latlong2/latlong.dart' hide Path;
 import '../core/theme.dart';
 import '../core/animations.dart';
 import '../core/constants.dart';
+import '../core/time_utils.dart';
 import '../models/meal_plan.dart';
 import '../models/surprise_note.dart';
 import '../models/couple_location.dart';
@@ -466,6 +467,8 @@ class Countdown3DCard extends StatefulWidget {
 class _Countdown3DCardState extends State<Countdown3DCard> {
   late Timer _timer;
   Duration _remaining = Duration.zero;
+  Duration _ntpOffset = Duration.zero;
+  bool _fetchingNtp = false;
   double _tiltX = 0;
   double _tiltY = 0;
 
@@ -473,6 +476,7 @@ class _Countdown3DCardState extends State<Countdown3DCard> {
   void initState() {
     super.initState();
     _tick();
+    _fetchNtpOffset();
     _timer = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
   }
 
@@ -482,8 +486,23 @@ class _Countdown3DCardState extends State<Countdown3DCard> {
     super.dispose();
   }
 
+  Future<void> _fetchNtpOffset() async {
+    if (_fetchingNtp) return;
+    _fetchingNtp = true;
+    try {
+      final trueTime = await TimeUtils.getTrueTime();
+      if (mounted) {
+        setState(() {
+          _ntpOffset = trueTime.difference(DateTime.now());
+        });
+      }
+    } catch (_) {}
+    _fetchingNtp = false;
+  }
+
   void _tick() {
-    final diff = AppConfig.weddingDate.difference(DateTime.now());
+    final adjustedNow = DateTime.now().add(_ntpOffset);
+    final diff = AppConfig.weddingDate.difference(adjustedNow);
     if (mounted) {
       setState(() => _remaining = diff);
     }

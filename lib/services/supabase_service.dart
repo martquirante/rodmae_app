@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -194,7 +195,7 @@ final class SupabaseWeddingRepository {
             .from('chat_history')
             .select()
             .eq('couple_id', AppConfig.coupleId)
-            .order('created_at', ascending: true);
+            .order('created_at', ascending: false);
         final list = List<Map<String, dynamic>>.from(rows as List);
         await _saveCache('cached_chat', list);
         return list.map(ChatMessage.fromMap).toList();
@@ -242,7 +243,7 @@ final class SupabaseWeddingRepository {
             .from('chat_history')
             .stream(primaryKey: ['id'])
             .eq('couple_id', AppConfig.coupleId)
-            .order('created_at', ascending: true)
+            .order('created_at', ascending: false)
             .listen(
               (rows) async {
                 final list = List<Map<String, dynamic>>.from(rows);
@@ -273,15 +274,27 @@ final class SupabaseWeddingRepository {
     return controller.stream;
   }
 
-  Future<void> sendChatMessage(String message) async {
+  Future<void> sendChatMessage(
+    String message, {
+    String? sender,
+    String? replyToId,
+    String? replyToSender,
+    String? replyToText,
+    String? voiceUrl,
+  }) async {
+    final activeSender = sender ?? PartnerIdentity.active.value.label;
     final localMap = {
       'id': DateTime.now().microsecondsSinceEpoch.toString(),
       'couple_id': AppConfig.coupleId,
-      'sender': PartnerIdentity.active.value.label,
+      'sender': activeSender,
       'message': message,
       'status': 'sent',
-      'message_type': 'text',
-      'created_at': DateTime.now().toIso8601String(),
+      'message_type': voiceUrl != null ? 'voice' : 'text',
+      'created_at': DateTime.now().toUtc().toIso8601String(),
+      if (replyToId != null) 'reply_to_id': replyToId,
+      if (replyToSender != null) 'reply_to_sender': replyToSender,
+      if (replyToText != null) 'reply_to_text': replyToText,
+      if (voiceUrl != null) 'voice_url': voiceUrl,
     };
     final cached = await _loadCache('cached_chat');
     cached.add(localMap);
@@ -291,24 +304,31 @@ final class SupabaseWeddingRepository {
       if (AppRuntime.supabaseReady) {
         final inserted = await _client.from('chat_history').insert({
           'couple_id': AppConfig.coupleId,
-          'sender': PartnerIdentity.active.value.label,
+          'sender': activeSender,
           'message': message,
           'status': 'sent',
-          'message_type': 'text',
-          'created_at': DateTime.now().toIso8601String(),
+          'message_type': voiceUrl != null ? 'voice' : 'text',
+          // Omit created_at so Supabase uses its server-side now() default!
+          if (replyToId != null) 'reply_to_id': int.tryParse(replyToId),
+          if (replyToSender != null) 'reply_to_sender': replyToSender,
+          if (replyToText != null) 'reply_to_text': replyToText,
+          if (voiceUrl != null) 'voice_url': voiceUrl,
         }).select().single();
 
         final messageId = inserted['id']?.toString() ?? '';
         unawaited(NotificationService.sendPushToSpouse(
-          title: '${PartnerIdentity.active.value.label} 💬',
-          body: message,
+          title: '$activeSender 💬',
+          body: voiceUrl != null ? '🎤 Sent a voice message' : message,
           type: 'chat',
-          sender: PartnerIdentity.active.value.label,
+          sender: activeSender,
           id: messageId,
         ));
+      } else {
+        throw StateError('Supabase is not ready.');
       }
     } catch (e) {
       print('Supabase sendChatMessage error: $e');
+      rethrow;
     }
   }
 
@@ -323,7 +343,14 @@ final class SupabaseWeddingRepository {
       'message_type': msg.messageType.name,
       if (msg.imageUrl != null) 'image_url': msg.imageUrl,
       if (msg.locationData != null) 'location_data': msg.locationData,
-      'created_at': msg.createdAt.toIso8601String(),
+      'created_at': msg.createdAt.toUtc().toIso8601String(),
+      if (msg.replyToId != null) 'reply_to_id': msg.replyToId,
+      if (msg.replyToSender != null) 'reply_to_sender': msg.replyToSender,
+      if (msg.replyToText != null) 'reply_to_text': msg.replyToText,
+      if (msg.reactions != null) 'reactions': msg.reactions,
+      'is_deleted': msg.isDeleted,
+      'is_edited': msg.isEdited,
+      if (msg.voiceUrl != null) 'voice_url': msg.voiceUrl,
     };
     final cached = await _loadCache('cached_chat');
     cached.add(localMap);
@@ -331,7 +358,33 @@ final class SupabaseWeddingRepository {
 
     try {
       if (AppRuntime.supabaseReady) {
-        await _client.from('chat_history').insert(localMap);
+        final Map<String, dynamic> dbMap = {
+          'couple_id': AppConfig.coupleId,
+          'sender': msg.sender,
+          'message': msg.message,
+          'status': msg.status.name,
+          'message_type': msg.messageType.name,
+          if (msg.imageUrl != null) 'image_url': msg.imageUrl,
+          if (msg.locationData != null) 'location_data': msg.locationData,
+          // Omit created_at so Supabase uses its server-side now() default!
+          if (msg.replyToId != null) 'reply_to_id': int.tryParse(msg.replyToId!),
+          if (msg.replyToSender != null) 'reply_to_sender': msg.replyToSender,
+          if (msg.replyToText != null) 'reply_to_text': msg.replyToText,
+          if (msg.reactions != null) 'reactions': msg.reactions,
+          'is_deleted': msg.isDeleted,
+          'is_edited': msg.isEdited,
+          if (msg.voiceUrl != null) 'voice_url': msg.voiceUrl,
+        };
+
+        // If it's a real, non-temporary message ID, include it, otherwise let DB generate it.
+        if (msg.id.isNotEmpty && !msg.id.startsWith('-temp_')) {
+          final numericId = int.tryParse(msg.id);
+          if (numericId != null) {
+            dbMap['id'] = numericId;
+          }
+        }
+
+        await _client.from('chat_history').insert(dbMap);
 
         String body = msg.message;
         if (msg.messageType == MessageType.image) {
@@ -361,9 +414,123 @@ final class SupabaseWeddingRepository {
           triggerType: triggerType,
           id: msg.id,
         ));
+      } else {
+        throw StateError('Supabase is not ready.');
       }
     } catch (e) {
       print('Supabase sendRichMessage error: $e');
+      rethrow;
+    }
+  }
+
+  /// Updates a message reaction in database and cache.
+  Future<void> updateMessageReaction(String messageId, Map<String, String> reactions) async {
+    final cached = await _loadCache('cached_chat');
+    for (final msg in cached) {
+      if (msg['id']?.toString() == messageId) {
+        msg['reactions'] = reactions;
+        break;
+      }
+    }
+    await _saveCache('cached_chat', cached);
+
+    try {
+      if (AppRuntime.supabaseReady) {
+        final numericId = int.tryParse(messageId);
+        if (numericId != null) {
+          await _client
+              .from('chat_history')
+              .update({'reactions': reactions})
+              .eq('id', numericId);
+        }
+      }
+    } catch (e) {
+      print('Supabase updateMessageReaction error: $e');
+    }
+  }
+
+  /// Soft-deletes a message (unsend) by marking it as deleted and clearing content.
+  Future<void> unsendMessage(String messageId) async {
+    final cached = await _loadCache('cached_chat');
+    for (final msg in cached) {
+      if (msg['id']?.toString() == messageId) {
+        msg['is_deleted'] = true;
+        msg['message'] = '';
+        break;
+      }
+    }
+    await _saveCache('cached_chat', cached);
+
+    try {
+      if (AppRuntime.supabaseReady) {
+        final numericId = int.tryParse(messageId);
+        if (numericId != null) {
+          await _client
+              .from('chat_history')
+              .update({
+                'is_deleted': true,
+                'message': '',
+              })
+              .eq('id', numericId);
+        }
+      }
+    } catch (e) {
+      print('Supabase unsendMessage error: $e');
+      rethrow;
+    }
+  }
+
+  /// Edits a message text by setting the new content and updating the is_edited flag.
+  Future<void> editMessage(String messageId, String newText) async {
+    String? originalText;
+    final cached = await _loadCache('cached_chat');
+    for (final msg in cached) {
+      if (msg['id']?.toString() == messageId) {
+        final isAlreadyEdited = msg['is_edited'] == true || msg['original_message'] != null;
+        if (!isAlreadyEdited) {
+          originalText = msg['message']?.toString();
+          msg['original_message'] = originalText;
+        } else {
+          originalText = msg['original_message']?.toString();
+        }
+        msg['message'] = newText;
+        msg['is_edited'] = true;
+        break;
+      }
+    }
+    await _saveCache('cached_chat', cached);
+
+    try {
+      if (AppRuntime.supabaseReady) {
+        final numericId = int.tryParse(messageId);
+        if (numericId != null) {
+          if (originalText == null) {
+            final existing = await _client
+                .from('chat_history')
+                .select('message, original_message, is_edited')
+                .eq('id', numericId)
+                .single();
+            final isAlreadyEdited = existing['is_edited'] == true || existing['original_message'] != null;
+            if (!isAlreadyEdited) {
+              originalText = existing['message']?.toString();
+            } else {
+              originalText = existing['original_message']?.toString();
+            }
+          }
+
+          await _client
+              .from('chat_history')
+              .update({
+                'message': newText,
+                'is_edited': true,
+                if (originalText != null) 'original_message': originalText,
+              })
+              .eq('id', numericId);
+        }
+      }
+    } catch (e) {
+      print('Supabase editMessage error: $e');
+      rethrow;
     }
   }
 
@@ -1173,5 +1340,34 @@ final class SupabaseWeddingRepository {
       // ignore: avoid_print
       print('Presence heartbeat error: $e');
     }
+  }
+
+  /// Upload a voice message audio file to the 'voice_messages' Supabase bucket and return public URL.
+  Future<String> uploadVoiceMessage(String filePath) async {
+    if (!AppRuntime.supabaseReady) {
+      throw StateError('Supabase is not initialized. Cannot upload voice message.');
+    }
+
+    final file = File(filePath);
+    if (!await file.exists()) {
+      throw FileSystemException('Voice file does not exist', filePath);
+    }
+
+    final bytes = await file.readAsBytes();
+    final filename = '${DateTime.now().microsecondsSinceEpoch}.m4a';
+    final storagePath = '${AppConfig.coupleId}/$filename';
+
+    await _client.storage
+        .from('voice_messages')
+        .uploadBinary(
+          storagePath,
+          bytes,
+          fileOptions: const FileOptions(
+            contentType: 'audio/m4a',
+            upsert: false,
+          ),
+        );
+
+    return _client.storage.from('voice_messages').getPublicUrl(storagePath);
   }
 }

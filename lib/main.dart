@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter_native_splash/flutter_native_splash.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 import 'firebase_options.dart';
 import 'core/theme.dart';
@@ -44,6 +45,13 @@ import 'package:latlong2/latlong.dart' hide Path;
 Future<void> main() async {
   // ── 1. Binding must be initialized before anything else ────────────────────
   final widgetsBinding = WidgetsFlutterBinding.ensureInitialized();
+
+  // ── Initialize flutter_dotenv safely ────────────────────────────────────────
+  try {
+    await dotenv.load(fileName: ".env");
+  } catch (e) {
+    debugPrint('Failed to load .env configuration: $e');
+  }
 
   // ── 2. Preserve the native splash until we explicitly remove it ────────────
   //    The OS will keep showing the splash screen drawn by flutter_native_splash
@@ -263,37 +271,6 @@ class _MainNavigationShellState extends State<MainNavigationShell>
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await NotificationService.requestPermission();
       unawaited(NotificationService.markAllPendingMessagesAsDelivered());
-
-      // Trigger diagnostic test notification to verify native notifications and sound are working locally
-      try {
-        final testDetails = NotificationDetails(
-          android: const AndroidNotificationDetails(
-            'rodmae_high_priority_channel_v2',
-            'RodMae High Priority Alerts',
-            channelDescription: 'Real-time love signals, chats, and notes from your partner',
-            importance: Importance.max,
-            priority: Priority.high,
-            playSound: true,
-            enableVibration: true,
-            largeIcon: null,
-            ticker: 'RodMae Diagnostic Alert',
-          ),
-          iOS: const DarwinNotificationDetails(
-            presentAlert: true,
-            presentBadge: true,
-            presentSound: true,
-          ),
-        );
-        await NotificationService.instance.flutterLocalNotificationsPlugin.show(
-          888,
-          'RodMae Diagnostic Alert 🔔',
-          'Native notifications and sound are working!',
-          testDetails,
-          payload: jsonEncode({'type': 'test'}),
-        );
-      } catch (e) {
-        debugPrint('MainNavigationShell: failed to show diagnostic notification: $e');
-      }
     });
   }
 
@@ -450,17 +427,11 @@ class _MainNavigationShellState extends State<MainNavigationShell>
       if (!mounted) return;
       final currentPartner = PartnerIdentity.active.value.label.toLowerCase();
 
-      // Update status for any sent messages from partner
+      // Update status for any sent messages from partner to delivered
       for (final msg in messages) {
         final isSpouse = msg.sender.toLowerCase() != currentPartner;
         if (isSpouse && msg.status == MessageStatus.sent) {
-          final onChatTab = AppNotificationNavigation.mainTabNotifier.value == 1 &&
-              AppNotificationNavigation.privateChatTabNotifier.value == 0;
-          if (onChatTab) {
-            unawaited(NotificationService.markMessageAsSeen(msg.id, type: 'chat'));
-          } else {
-            unawaited(NotificationService.markMessageAsDelivered(msg.id, type: 'chat'));
-          }
+          unawaited(NotificationService.markMessageAsDelivered(msg.id, type: 'chat'));
         }
       }
 
