@@ -1,0 +1,75 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.buildlog/
+.history
+.svn/
+migrate.cfg
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# Visual Studio Code related
+.vscode/
+.workspace
+.history/
+*.code-workspace
+
+# Flutter/Dart related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+/build/
+
+# Web related
+lib/generated_plugin_registrant.dart
+
+# Symbol files
+*.pdb
+
+# Executables
+*.apk
+*.ap_
+*.aab
+
+# Local environment and private keys
+.env
+.env.*
+*.keystore
+*.jks
+*.p12
+*.pem
+/android/local.properties
+/android/key.properties
+/ios/Flutter/Flutter.podspec
+
+# macOS specific
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+
+# Windows specific
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Android specific
+.gradle/
+/android/app/src/main/res/raw/
+/android/app/src/main/res/values/google-services.json
+
+# Embedded duplicate repository
+/rodmae_app/
