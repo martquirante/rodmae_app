@@ -14,6 +14,9 @@ import '../services/auth_service.dart';
 import '../services/gemini_service.dart';
 import '../core/constants.dart';
 import '../widgets/particle_burst.dart';
+import '../widgets/three_d_flip_success_card.dart';
+import '../widgets/aesthetic_press_scale.dart';
+import '../core/utils.dart';
 
 class AddTransactionSheet extends StatefulWidget {
   final Function(Transaction)? onTransactionSaved;
@@ -51,6 +54,8 @@ class _AddTransactionSheetState extends State<AddTransactionSheet> {
   bool _saving = false;
   bool _scanning = false;
   bool _showSuccessOverlay = false;
+  bool _isSynced = true;
+  Transaction? _savedTransaction;
   List<Wallet> _wallets = [];
 
   final List<Map<String, dynamic>> _quickCategories = [
@@ -212,10 +217,13 @@ class _AddTransactionSheetState extends State<AddTransactionSheet> {
 
     try {
       Transaction? primaryTx;
+      bool isSyncedLocal = true;
 
       if (_selectedType == TransactionType.transfer) {
+        final txFromId = UuidUtil.generate();
+        final txToId = UuidUtil.generate();
         final txFrom = Transaction(
-          id: DateTime.now().microsecondsSinceEpoch.toString(),
+          id: txFromId,
           walletId: _selectedWallet!.id,
           createdByUserId: activePartner,
           type: TransactionType.transfer,
@@ -226,7 +234,7 @@ class _AddTransactionSheetState extends State<AddTransactionSheet> {
         );
 
         final txTo = Transaction(
-          id: (DateTime.now().microsecondsSinceEpoch + 1).toString(),
+          id: txToId,
           walletId: _destinationWallet!.id,
           createdByUserId: activePartner,
           type: TransactionType.transfer,
@@ -236,12 +244,18 @@ class _AddTransactionSheetState extends State<AddTransactionSheet> {
           notes: 'To ${_destinationWallet!.name} from ${_selectedWallet!.name}',
         );
 
-        await FinanceRepository.instance.insertTransaction(txFrom);
-        await FinanceRepository.instance.insertTransaction(txTo);
+        try {
+          await FinanceRepository.instance.insertTransaction(txFrom);
+          await FinanceRepository.instance.insertTransaction(txTo);
+        } catch (syncErr) {
+          isSyncedLocal = false;
+          debugPrint('Transfer sync warning: $syncErr');
+        }
         primaryTx = txFrom;
       } else {
+        final txId = UuidUtil.generate();
         final transaction = Transaction(
-          id: DateTime.now().microsecondsSinceEpoch.toString(),
+          id: txId,
           walletId: _selectedWallet!.id,
           createdByUserId: activePartner,
           type: _selectedType,
@@ -252,7 +266,7 @@ class _AddTransactionSheetState extends State<AddTransactionSheet> {
           splits: (_selectedType == TransactionType.expense && _isSplit)
               ? [
                   TransactionSplit(
-                    transactionId: DateTime.now().microsecondsSinceEpoch.toString(),
+                    transactionId: txId,
                     userId: activePartner.toLowerCase() == 'rodel' ? 'marymae' : 'rodel',
                     amountOwed: amount * _splitPercentage / 100.0,
                     isSettled: false,
@@ -261,26 +275,31 @@ class _AddTransactionSheetState extends State<AddTransactionSheet> {
               : const [],
         );
 
-        if (_selectedType == TransactionType.expense && _isSplit) {
-          await FinanceRepository.instance.addSplitTransaction(transaction, _splitPercentage);
-        } else {
-          await FinanceRepository.instance.insertTransaction(transaction);
-        }
+        try {
+          if (_selectedType == TransactionType.expense && _isSplit) {
+            await FinanceRepository.instance.addSplitTransaction(transaction, _splitPercentage);
+          } else {
+            await FinanceRepository.instance.insertTransaction(transaction);
+          }
 
-        if (_selectedType == TransactionType.expense && _isRecurring) {
-          final upcoming = UpcomingPayment(
-            id: DateTime.now().microsecondsSinceEpoch.toString(),
-            coupleId: AppConfig.coupleId,
-            title: '$_selectedCategory Installment Plan',
-            amount: amount,
-            dueDate: DateTime.now().add(const Duration(days: 30)),
-            isRecurring: true,
-            isInstallment: true,
-            totalInstallments: _totalInstallments,
-            currentInstallment: 1,
-            recurrenceInterval: _recurrenceInterval,
-          );
-          await FinanceRepository.instance.insertUpcomingPayment(upcoming);
+          if (_selectedType == TransactionType.expense && _isRecurring) {
+            final upcoming = UpcomingPayment(
+              id: UuidUtil.generate(),
+              coupleId: AppConfig.coupleId,
+              title: '$_selectedCategory Installment Plan',
+              amount: amount,
+              dueDate: DateTime.now().add(const Duration(days: 30)),
+              isRecurring: true,
+              isInstallment: true,
+              totalInstallments: _totalInstallments,
+              currentInstallment: 1,
+              recurrenceInterval: _recurrenceInterval,
+            );
+            await FinanceRepository.instance.insertUpcomingPayment(upcoming);
+          }
+        } catch (syncErr) {
+          isSyncedLocal = false;
+          debugPrint('Transaction sync warning: $syncErr');
         }
         primaryTx = transaction;
       }
@@ -288,11 +307,13 @@ class _AddTransactionSheetState extends State<AddTransactionSheet> {
       await HapticFeedback.heavyImpact();
       _particleBurstKey.currentState?.burst();
       setState(() {
+        _savedTransaction = primaryTx;
+        _isSynced = isSyncedLocal;
         _showSuccessOverlay = true;
         _saving = false;
       });
 
-      await Future.delayed(const Duration(milliseconds: 1400));
+      await Future.delayed(const Duration(milliseconds: 1800));
       
       if (mounted) {
         widget.onTransactionSaved?.call(primaryTx!);
@@ -497,22 +518,27 @@ class _AddTransactionSheetState extends State<AddTransactionSheet> {
                                 const SizedBox(width: 12),
                               ],
                               Expanded(
-                                child: ElevatedButton(
-                                  onPressed: _saving ? null : _saveTransaction,
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: RodMaeColors.gold,
-                                    foregroundColor: RodMaeColors.navy,
-                                    elevation: 4,
-                                    padding: const EdgeInsets.symmetric(vertical: 14),
-                                    shadowColor: RodMaeColors.gold.withValues(alpha: 0.35),
-                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                                child: AestheticPressScale(
+                                  onTap: _saving ? null : _saveTransaction,
+                                  child: ElevatedButton(
+                                    onPressed: null, // Handled by AestheticPressScale
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: RodMaeColors.gold,
+                                      foregroundColor: RodMaeColors.navy,
+                                      disabledBackgroundColor: RodMaeColors.gold,
+                                      disabledForegroundColor: RodMaeColors.navy,
+                                      elevation: 4,
+                                      padding: const EdgeInsets.symmetric(vertical: 14),
+                                      shadowColor: RodMaeColors.gold.withValues(alpha: 0.35),
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                                    ),
+                                    child: _saving
+                                        ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: RodMaeColors.navy))
+                                        : Text(
+                                            'SAVE TRANSACTION',
+                                            style: GoogleFonts.inter(fontWeight: FontWeight.w900, fontSize: 13, letterSpacing: 0.8),
+                                          ),
                                   ),
-                                  child: _saving
-                                      ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: RodMaeColors.navy))
-                                      : Text(
-                                          'SAVE TRANSACTION',
-                                          style: GoogleFonts.inter(fontWeight: FontWeight.w900, fontSize: 13, letterSpacing: 0.8),
-                                        ),
                                 ),
                               ),
                             ],
@@ -525,7 +551,7 @@ class _AddTransactionSheetState extends State<AddTransactionSheet> {
               ),
             ),
           ),
-          if (_showSuccessOverlay)
+          if (_showSuccessOverlay && _savedTransaction != null)
             Positioned.fill(
               child: ClipRRect(
                 borderRadius: const BorderRadius.only(
@@ -533,51 +559,15 @@ class _AddTransactionSheetState extends State<AddTransactionSheet> {
                   topRight: Radius.circular(28),
                 ),
                 child: BackdropFilter(
-                  filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+                  filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
                   child: Container(
-                    color: (isDark ? Colors.black : Colors.white).withValues(alpha: 0.8),
-                    child: Center(
-                      child: TweenAnimationBuilder<double>(
-                        tween: Tween(begin: 0.0, end: 1.0),
-                        duration: const Duration(milliseconds: 600),
-                        curve: Curves.elasticOut,
-                        builder: (context, value, child) {
-                          return Transform.scale(
-                            scale: value,
-                            child: Opacity(
-                              opacity: value.clamp(0.0, 1.0),
-                              child: child,
-                            ),
-                          );
-                        },
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Container(
-                              padding: const EdgeInsets.all(18),
-                              decoration: const BoxDecoration(
-                                color: RodMaeColors.mint,
-                                shape: BoxShape.circle,
-                              ),
-                              child: const Icon(
-                                Icons.check_rounded,
-                                size: 54,
-                                color: Colors.white,
-                              ),
-                            ),
-                            const SizedBox(height: 16),
-                            Text(
-                              'TRANSACTION LOGGED!',
-                              style: GoogleFonts.inter(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w900,
-                                color: isDark ? Colors.white : RodMaeColors.navy,
-                                letterSpacing: 1.2,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
+                    color: (isDark ? Colors.black : Colors.white).withValues(alpha: 0.85),
+                    child: ThreeDFlipSuccessCard(
+                      amount: _savedTransaction!.amount,
+                      category: _savedTransaction!.categoryId ?? 'General',
+                      walletName: _selectedWallet?.name ?? 'Shared Wallet',
+                      notes: _savedTransaction!.notes,
+                      isSynced: _isSynced,
                     ),
                   ),
                 ),

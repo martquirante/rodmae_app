@@ -20,7 +20,7 @@ final class TransactionReaction {
       id: json['id']?.toString() ?? '',
       transactionId: json['transaction_id']?.toString() ?? '',
       userId: json['user_id']?.toString() ?? '',
-      reactionType: json['reaction_type']?.toString() ?? 'thumbs_up',
+      reactionType: json['emoji']?.toString() ?? json['reaction_type']?.toString() ?? 'thumbs_up',
       createdAt: Formatters.asDate(json['created_at']),
     );
   }
@@ -30,6 +30,7 @@ final class TransactionReaction {
       'id': id,
       'transaction_id': transactionId,
       'user_id': userId,
+      'emoji': reactionType,
       'reaction_type': reactionType,
       'created_at': createdAt.toIso8601String(),
     };

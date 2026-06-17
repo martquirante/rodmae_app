@@ -1,0 +1,38 @@
+# Implementation Tasks — Financial Hub Feature Completion & DB Integration
+
+- [x] 1. Create database models for Net Worth tracking
+    - [x] Create `AssetLiability` model in `lib/models/asset_liability.dart`
+    - [x] Create `NetWorthSnapshot` model in `lib/models/net_worth_snapshot.dart`
+- [x] 2. Extend repository functionality in `lib/services/finance_repository.dart`
+    - [x] Add CRUD methods for Assets & Liabilities
+    - [x] Add CRUD methods for Net Worth Snapshots
+    - [x] Update `fetchLifeEvents` to query nested cost breakdown sub-items
+    - [x] Add insert/delete methods for `LifeEventCostItem`
+    - [x] Add `updateLifeEventSavings` method for progress updates
+- [x] 3. Implement Net Worth Tracker UI in `lib/screens/finances_screen.dart`
+    - [x] Compute real Combined Net Worth from live wallets and manual assets/liabilities
+    - [x] Add Milestone celebration banner based on computed net worth
+    - [x] Add manual asset/liability cards list with delete actions
+    - [x] Add Log Snapshot history list and timeline
+    - [x] Add "Add Item" dialog for manual assets/liabilities
+- [x] 4. Implement Personal Allowance auto-transfer & privacy filters
+    - [x] Add "Allowance 💸" auto-transfer dialog and trigger in pockets overview
+    - [x] Deduct allowance from shared wallet and add to Rodel & Mae's pockets
+    - [x] Insert expense/income transaction logs for allowance transfers
+    - [x] Apply client-side feed filter to hide partner's private pocket transactions
+- [x] 5. Complete Life Event Planner features
+    - [x] Render collapsible/expanded list of cost sub-items inside each card
+    - [x] Add "Sub-item" dialog to insert new cost breakdown items
+    - [x] Add delete action for cost sub-items
+    - [x] Add "Mag-ipon" dialog to update savings progress
+    - [x] Add resource guides dialog with Filipino context checklist info for presets
+- [x] 6. Polish Monthly Report Cards
+    - [x] Compute and render flame streak badge (A/B grade months)
+    - [x] Add "Share Card 📸" button to copy report card summary to clipboard
+- [x] 7. Wire Push Notifications for Purchase Requests
+    - [x] Trigger spouse push notification upon purchase request submission
+    - [x] Trigger spouse push notification upon request approval or decline
+    - [x] Wrap actions in try-catch with success/error SnackBars
+- [x] 8. Verify codebase stability
+    - [x] Run `flutter analyze lib/` to verify zero compile errors
+    - [x] Run `flutter test test/db_diagnostic_test.dart` to verify tests pass

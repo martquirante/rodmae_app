@@ -1,3 +1,4 @@
+import '../core/constants.dart';
 import '../core/utils.dart';
 import 'transaction_reaction.dart';
 import 'transaction_comment.dart';
@@ -154,7 +155,12 @@ final class Transaction {
   }
 
   Map<String, dynamic> toMap() => toJson();
-  Map<String, dynamic> toInsertMap() => toJson();
+
+  Map<String, dynamic> toInsertMap() {
+    final map = toJson();
+    map['couple_id'] = AppConfig.coupleId;
+    return map;
+  }
 
   Transaction copyWith({
     String? id,

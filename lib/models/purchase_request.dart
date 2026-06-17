@@ -7,6 +7,7 @@ final class PurchaseRequest {
   final String itemName;
   final double amount;
   final String status; // 'pending', 'approved', 'declined'
+  final String reason;
   final DateTime createdAt;
 
   const PurchaseRequest({
@@ -16,6 +17,7 @@ final class PurchaseRequest {
     required this.itemName,
     required this.amount,
     required this.status,
+    this.reason = '',
     required this.createdAt,
   });
 
@@ -27,6 +29,7 @@ final class PurchaseRequest {
       itemName: json['item_name']?.toString() ?? 'Unnamed Item',
       amount: Formatters.asDouble(json['amount'] ?? 0.0),
       status: json['status']?.toString() ?? 'pending',
+      reason: json['reason']?.toString() ?? '',
       createdAt: Formatters.asDate(json['created_at']),
     );
   }
@@ -39,6 +42,7 @@ final class PurchaseRequest {
       'item_name': itemName,
       'amount': amount,
       'status': status,
+      'reason': reason,
       'created_at': createdAt.toIso8601String(),
     };
   }
@@ -50,6 +54,7 @@ final class PurchaseRequest {
     String? itemName,
     double? amount,
     String? status,
+    String? reason,
     DateTime? createdAt,
   }) {
     return PurchaseRequest(
@@ -59,6 +64,7 @@ final class PurchaseRequest {
       itemName: itemName ?? this.itemName,
       amount: amount ?? this.amount,
       status: status ?? this.status,
+      reason: reason ?? this.reason,
       createdAt: createdAt ?? this.createdAt,
     );
   }

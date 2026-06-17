@@ -505,7 +505,9 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
     _scrollToBottom();
 
     final isAssistantCommand = text.trim().toLowerCase().startsWith('@assistant');
-    final isFinancesCommand = text.trim().toLowerCase().startsWith('@finances');
+    final isFinancesCommand = text.trim().toLowerCase().startsWith('@finances') ||
+                              text.trim().toLowerCase().startsWith('@financial') ||
+                              text.trim().toLowerCase().startsWith('@finacila');
 
     // Fetch the true time via NTP.now() with fallback
     DateTime trueTime;
@@ -619,7 +621,7 @@ class _PrivateChatScreenState extends State<PrivateChatScreen>
     });
 
     try {
-      final cleanPrompt = userPrompt.replaceFirst(RegExp(r'^@finances\s*', caseSensitive: false), '').trim();
+      final cleanPrompt = userPrompt.replaceFirst(RegExp(r'^@(finances|financial|finacila)\s*', caseSensitive: false), '').trim();
 
       // 1. Fetch live wallets and transactions context
       final wallets = await FinanceRepository.instance.fetchWallets();

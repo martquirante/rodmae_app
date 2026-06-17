@@ -621,52 +621,90 @@ class _FinanceManagementTabState extends State<FinanceManagementTab> {
                     padding: const EdgeInsets.fromLTRB(18, 0, 18, 122),
                     children: [
                       const SizedBox(height: 12),
-                      Text(
-                        'COMBINED NET WORTH',
-                        style: GoogleFonts.inter(
-                          color: isDark ? Colors.white54 : RodMaeColors.lightTextSoft,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 1.5,
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        crossAxisAlignment: CrossAxisAlignment.baseline,
-                        textBaseline: TextBaseline.alphabetic,
-                        children: [
-                          TweenAnimationBuilder<double>(
-                            tween: Tween<double>(begin: 0.0, end: netWorth),
-                            duration: const Duration(milliseconds: 800),
-                            curve: Curves.easeOutCubic,
-                            builder: (context, value, child) {
-                              return Text(
-                                '₱${Formatters.money(value).replaceAll('PHP', '').trim()}',
-                                style: GoogleFonts.robotoMono(
-                                  color: isDark ? Colors.white : RodMaeColors.navy,
-                                  fontSize: 32,
-                                  fontWeight: FontWeight.w900,
-                                ),
-                              );
-                            },
-                          ),
-                          Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(Icons.trending_up_rounded, color: RodMaeColors.mint, size: 18),
-                              const SizedBox(width: 4),
-                              Text(
-                                '+3.8%',
-                                style: GoogleFonts.inter(
-                                  color: RodMaeColors.mint,
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w900,
-                                ),
+                      TiltCard(
+                        child: Container(
+                          padding: const EdgeInsets.all(22),
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: isDark 
+                                  ? [Colors.white.withOpacity(0.08), Colors.white.withOpacity(0.02)]
+                                  : [RodMaeColors.navy.withOpacity(0.07), RodMaeColors.navy.withOpacity(0.01)],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
+                            borderRadius: BorderRadius.circular(28),
+                            border: Border.all(
+                              color: isDark ? Colors.white12 : Colors.black12,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.05),
+                                blurRadius: 20,
+                                offset: const Offset(0, 8),
                               ),
                             ],
                           ),
-                        ],
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'COMBINED NET WORTH',
+                                style: GoogleFonts.inter(
+                                  color: isDark ? Colors.white38 : RodMaeColors.navy.withOpacity(0.5),
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 1.5,
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Expanded(
+                                    child: TweenAnimationBuilder<double>(
+                                      tween: Tween<double>(begin: 0.0, end: netWorth),
+                                      duration: const Duration(milliseconds: 800),
+                                      curve: Curves.easeOutCubic,
+                                      builder: (context, value, child) {
+                                        return Text(
+                                          '₱${Formatters.money(value).replaceAll('PHP', '').trim()}',
+                                          style: GoogleFonts.robotoMono(
+                                            color: isDark ? Colors.white : RodMaeColors.navy,
+                                            fontSize: 28,
+                                            fontWeight: FontWeight.w900,
+                                          ),
+                                          overflow: TextOverflow.ellipsis,
+                                        );
+                                      },
+                                    ),
+                                  ),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                    decoration: BoxDecoration(
+                                      color: RodMaeColors.mint.withOpacity(0.15),
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const Icon(Icons.trending_up_rounded, color: RodMaeColors.mint, size: 16),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          '+3.8%',
+                                          style: GoogleFonts.inter(
+                                            color: RodMaeColors.mint,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w900,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
                       const SizedBox(height: 24),
 
@@ -700,9 +738,11 @@ class _FinanceManagementTabState extends State<FinanceManagementTab> {
                                   ),
                                 ),
                                 const SizedBox(height: 12),
-                                MonthlyReportCard(
-                                  report: activeReport,
-                                  onAskCoach: () => _openAICoachChat(activeReport!),
+                                TiltCard(
+                                  child: MonthlyReportCard(
+                                    report: activeReport,
+                                    onAskCoach: () => _openAICoachChat(activeReport!),
+                                  ),
                                 ),
                                 const SizedBox(height: 24),
                               ],
@@ -2027,30 +2067,43 @@ class TiltCard extends StatefulWidget {
 class _TiltCardState extends State<TiltCard> {
   double _tiltX = 0.0;
   double _tiltY = 0.0;
+  bool _isHovered = false;
+
+  void _resetTilt() {
+    if (mounted) {
+      setState(() {
+        _tiltX = 0.0;
+        _tiltY = 0.0;
+        _isHovered = false;
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onPanUpdate: (details) {
-        setState(() {
-          _tiltX += details.delta.dy * -0.0015;
-          _tiltY += details.delta.dx * 0.0015;
-          _tiltX = _tiltX.clamp(-0.15, 0.15);
-          _tiltY = _tiltY.clamp(-0.15, 0.15);
-        });
+    return Listener(
+      onPointerDown: (event) {
+        _isHovered = true;
+        _updateTilt(event.localPosition);
       },
-      onPanEnd: (_) => _resetTilt(),
-      onPanCancel: () => _resetTilt(),
+      onPointerMove: (event) {
+        if (_isHovered) {
+          _updateTilt(event.localPosition);
+        }
+      },
+      onPointerUp: (_) => _resetTilt(),
+      onPointerCancel: (_) => _resetTilt(),
       child: TweenAnimationBuilder<Offset>(
         tween: Tween<Offset>(begin: Offset.zero, end: Offset(_tiltX, _tiltY)),
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.easeOutCubic,
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOutQuad,
         builder: (context, tilt, child) {
           return Transform(
             transform: Matrix4.identity()
               ..setEntry(3, 2, 0.001) 
               ..rotateX(tilt.dx)
-              ..rotateY(tilt.dy),
+              ..rotateY(tilt.dy)
+              ..scale(_isHovered ? 0.97 : 1.0),
             alignment: FractionalOffset.center,
             child: widget.child,
           );
@@ -2059,10 +2112,20 @@ class _TiltCardState extends State<TiltCard> {
     );
   }
 
-  void _resetTilt() {
+  void _updateTilt(Offset localPos) {
+    final renderBox = context.findRenderObject() as RenderBox?;
+    if (renderBox == null) return;
+    
+    final size = renderBox.size;
+    final centerX = size.width / 2;
+    final centerY = size.height / 2;
+    
+    final percentX = (localPos.dx - centerX) / centerX;
+    final percentY = (localPos.dy - centerY) / centerY;
+    
     setState(() {
-      _tiltX = 0.0;
-      _tiltY = 0.0;
+      _tiltX = (-percentY * 0.12).clamp(-0.12, 0.12);
+      _tiltY = (percentX * 0.12).clamp(-0.12, 0.12);
     });
   }
 }

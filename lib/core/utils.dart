@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 final class Formatters {
   Formatters._();
@@ -148,3 +149,25 @@ final class JsonResponseParser {
     return cleaned;
   }
 }
+
+final class UuidUtil {
+  UuidUtil._();
+
+  static String generate() {
+    final random = Random.secure();
+    String hexDigit(int value) => value.toRadixString(16);
+    final charCodes = List<String>.generate(36, (index) {
+      if (index == 8 || index == 13 || index == 18 || index == 23) {
+        return '-';
+      } else if (index == 14) {
+        return '4';
+      } else if (index == 19) {
+        return hexDigit((random.nextInt(4) + 8));
+      } else {
+        return hexDigit(random.nextInt(16));
+      }
+    });
+    return charCodes.join();
+  }
+}
+

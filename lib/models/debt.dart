@@ -51,6 +51,7 @@ final class Debt {
 
   Map<String, dynamic> toMap() {
     return {
+      if (id.isNotEmpty) 'id': id,
       'couple_id': coupleId,
       'title': title,
       'total_amount': totalAmount,

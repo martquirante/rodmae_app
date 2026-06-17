@@ -9,6 +9,9 @@ import '../models/wallet.dart';
 import '../services/finance_repository.dart';
 import '../services/auth_service.dart';
 import '../core/constants.dart';
+import '../widgets/aesthetic_press_scale.dart';
+import '../widgets/particle_burst.dart';
+import 'package:flutter/services.dart';
 
 class GoalsDebtsScreen extends StatefulWidget {
   const GoalsDebtsScreen({super.key});
@@ -143,40 +146,72 @@ class _GoalsDebtsScreenState extends State<GoalsDebtsScreen> with SingleTickerPr
                     onPressed: () => Navigator.pop(ctx),
                     child: Text('CANCEL', style: GoogleFonts.inter(fontWeight: FontWeight.bold, color: RodMaeColors.textMuted)),
                   ),
-                  ElevatedButton(
-                    onPressed: () async {
-                      final title = titleController.text.trim();
-                      final target = double.tryParse(targetController.text) ?? 0.0;
-                      final saved = double.tryParse(savedController.text) ?? 0.0;
+                  Builder(
+                    builder: (btnCtx) {
+                      final goalParticleKey = GlobalKey<ParticleBurstState>();
+                      return ParticleBurst(
+                        key: goalParticleKey,
+                        child: AestheticPressScale(
+                          onTap: () async {
+                            final title = titleController.text.trim();
+                            final target = double.tryParse(targetController.text) ?? 0.0;
+                            final saved = double.tryParse(savedController.text) ?? 0.0;
 
-                      if (title.isEmpty || target <= 0) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Please enter a valid title and target amount.')),
-                        );
-                        return;
-                      }
+                            if (title.isEmpty || target <= 0) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Please enter a valid title and target amount.')),
+                              );
+                              return;
+                            }
 
-                      final goal = SavingsGoal(
-                        id: DateTime.now().microsecondsSinceEpoch.toString(),
-                        householdId: AppConfig.coupleId,
-                        name: title,
-                        targetAmount: target,
-                        currentAmount: saved,
-                        category: 'life_event',
-                        targetDate: selectedDeadline,
-                        createdAt: DateTime.now(),
+                            final goal = SavingsGoal(
+                              id: DateTime.now().microsecondsSinceEpoch.toString(),
+                              householdId: AppConfig.coupleId,
+                              name: title,
+                              targetAmount: target,
+                              currentAmount: saved,
+                              category: 'life_event',
+                              targetDate: selectedDeadline,
+                              createdAt: DateTime.now(),
+                            );
+
+                            goalParticleKey.currentState?.burst();
+                            await HapticFeedback.mediumImpact();
+
+                            bool syncSuccess = true;
+                            try {
+                              await FinanceRepository.instance.insertSavingsGoal(goal);
+                            } catch (e) {
+                              syncSuccess = false;
+                              debugPrint('Goal sync failure: $e');
+                            }
+
+                            await Future.delayed(const Duration(milliseconds: 550));
+
+                            if (context.mounted) {
+                              Navigator.pop(ctx);
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    syncSuccess
+                                        ? 'Savings goal created successfully!'
+                                        : 'Savings goal created locally (sync pending).',
+                                  ),
+                                ),
+                              );
+                            }
+                          },
+                          child: ElevatedButton(
+                            onPressed: null, // Managed by AestheticPressScale
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: RodMaeColors.gold,
+                              disabledBackgroundColor: RodMaeColors.gold,
+                            ),
+                            child: Text('CREATE', style: GoogleFonts.inter(fontWeight: FontWeight.bold, color: RodMaeColors.navy)),
+                          ),
+                        ),
                       );
-
-                      await FinanceRepository.instance.insertSavingsGoal(goal);
-                      if (context.mounted) {
-                        Navigator.pop(ctx);
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Savings goal created successfully!')),
-                        );
-                      }
                     },
-                    style: ElevatedButton.styleFrom(backgroundColor: RodMaeColors.gold),
-                    child: Text('CREATE', style: GoogleFonts.inter(fontWeight: FontWeight.bold, color: RodMaeColors.navy)),
                   ),
                 ],
               ),
@@ -237,7 +272,7 @@ class _GoalsDebtsScreenState extends State<GoalsDebtsScreen> with SingleTickerPr
                     ),
                     const SizedBox(height: 12),
                     DropdownButtonFormField<Wallet>(
-                      value: selectedWallet,
+                      initialValue: selectedWallet,
                       style: GoogleFonts.inter(fontSize: 13, color: isDark ? Colors.white : Colors.black),
                       dropdownColor: isDark ? RodMaeColors.background : Colors.white,
                       decoration: const InputDecoration(
@@ -262,33 +297,60 @@ class _GoalsDebtsScreenState extends State<GoalsDebtsScreen> with SingleTickerPr
                     onPressed: () => Navigator.pop(ctx),
                     child: Text('CANCEL', style: GoogleFonts.inter(fontWeight: FontWeight.bold, color: RodMaeColors.textMuted)),
                   ),
-                  ElevatedButton(
-                    onPressed: () async {
-                      final amt = double.tryParse(amountController.text) ?? 0.0;
-                      if (amt <= 0 || amt > debt.remainingAmount) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Please enter a valid amount (up to remaining debt).')),
-                        );
-                        return;
-                      }
+                  Builder(
+                    builder: (btnCtx) {
+                      final debtParticleKey = GlobalKey<ParticleBurstState>();
+                      return ParticleBurst(
+                        key: debtParticleKey,
+                        child: AestheticPressScale(
+                          onTap: () async {
+                            final amt = double.tryParse(amountController.text) ?? 0.0;
+                            if (amt <= 0 || amt > debt.remainingAmount) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Please enter a valid amount (up to remaining debt).')),
+                              );
+                              return;
+                            }
 
-                      Navigator.pop(ctx);
-                      final messenger = ScaffoldMessenger.of(context);
-                      try {
-                        await FinanceRepository.instance.recordDebtPayment(debt.id, amt, selectedWallet.id);
-                        messenger.showSnackBar(
-                          const SnackBar(content: Text('Payment recorded. Debt updated successfully!')),
-                        );
-                        // Refresh wallets
-                        _loadWallets();
-                      } catch (e) {
-                        messenger.showSnackBar(
-                          SnackBar(content: Text('Payment failed: $e')),
-                        );
-                      }
+                            debtParticleKey.currentState?.burst();
+                            await HapticFeedback.mediumImpact();
+
+                            bool syncSuccess = true;
+                            try {
+                              await FinanceRepository.instance.recordDebtPayment(debt.id, amt, selectedWallet.id);
+                            } catch (e) {
+                              syncSuccess = false;
+                              debugPrint('Debt payment sync failure: $e');
+                            }
+
+                            await Future.delayed(const Duration(milliseconds: 550));
+
+                            if (context.mounted) {
+                              Navigator.pop(ctx);
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    syncSuccess
+                                        ? 'Payment recorded successfully!'
+                                        : 'Payment recorded locally (sync pending).',
+                                  ),
+                                ),
+                              );
+                              // Refresh wallets
+                              _loadWallets();
+                            }
+                          },
+                          child: ElevatedButton(
+                            onPressed: null, // Managed by AestheticPressScale
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: RodMaeColors.gold,
+                              disabledBackgroundColor: RodMaeColors.gold,
+                            ),
+                            child: Text('CONFIRM SETTLE', style: GoogleFonts.inter(fontWeight: FontWeight.bold, color: RodMaeColors.navy)),
+                          ),
+                        ),
+                      );
                     },
-                    style: ElevatedButton.styleFrom(backgroundColor: RodMaeColors.gold),
-                    child: Text('CONFIRM SETTLE', style: GoogleFonts.inter(fontWeight: FontWeight.bold, color: RodMaeColors.navy)),
                   ),
                 ],
               ),
@@ -319,7 +381,7 @@ class _GoalsDebtsScreenState extends State<GoalsDebtsScreen> with SingleTickerPr
                   child: Row(
                     children: [
                       IconButton(
-                        icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white),
+                        icon: Icon(Icons.arrow_back_ios_new_rounded, color: isDark ? Colors.white : RodMaeColors.navy),
                         onPressed: () => Navigator.pop(context),
                       ),
                       const SizedBox(width: 8),
@@ -328,7 +390,7 @@ class _GoalsDebtsScreenState extends State<GoalsDebtsScreen> with SingleTickerPr
                         style: GoogleFonts.playfairDisplay(
                           fontWeight: FontWeight.w900,
                           fontSize: 20,
-                          color: Colors.white,
+                          color: isDark ? Colors.white : RodMaeColors.navy,
                           letterSpacing: 1.0,
                         ),
                       ),
@@ -381,6 +443,7 @@ class _GoalsDebtsScreenState extends State<GoalsDebtsScreen> with SingleTickerPr
   }
 
   Widget _buildSavingsGoalsTab() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return StreamBuilder<List<SavingsGoal>>(
       stream: FinanceRepository.instance.watchSavingsGoals(),
       builder: (context, snapshot) {
@@ -403,13 +466,13 @@ class _GoalsDebtsScreenState extends State<GoalsDebtsScreen> with SingleTickerPr
                       const SizedBox(height: 16),
                       Text(
                         'No savings goals created yet.',
-                        style: GoogleFonts.inter(fontWeight: FontWeight.w800, fontSize: 16, color: Colors.white),
+                        style: GoogleFonts.inter(fontWeight: FontWeight.w800, fontSize: 16, color: isDark ? Colors.white : RodMaeColors.navy),
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        'Create shared targets like wedding expenses, house downpayment, or honeymoon travel!',
+                        'Create shared targets like wedding expenses, house down payment, or honeymoon travel!',
                         textAlign: TextAlign.center,
-                        style: GoogleFonts.inter(color: RodMaeColors.textSoft, fontSize: 12),
+                        style: GoogleFonts.inter(color: isDark ? RodMaeColors.textSoft : RodMaeColors.navy.withValues(alpha: 0.7), fontSize: 12),
                       ),
                     ],
                   ),
@@ -465,7 +528,7 @@ class _GoalsDebtsScreenState extends State<GoalsDebtsScreen> with SingleTickerPr
                                 style: GoogleFonts.inter(
                                   fontWeight: FontWeight.w900,
                                   fontSize: 14,
-                                  color: Colors.white,
+                                  color: isDark ? Colors.white : RodMaeColors.navy,
                                 ),
                               ),
                               const SizedBox(height: 6),
@@ -481,7 +544,7 @@ class _GoalsDebtsScreenState extends State<GoalsDebtsScreen> with SingleTickerPr
                                   ),
                                   Text(
                                     ' / ₱${Formatters.compactMoney(goal.targetAmount).replaceAll('PHP ', '')}',
-                                    style: GoogleFonts.robotoMono(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white70),
+                                    style: GoogleFonts.robotoMono(fontSize: 11, fontWeight: FontWeight.bold, color: isDark ? Colors.white70 : RodMaeColors.navy.withValues(alpha: 0.7)),
                                   ),
                                 ],
                               ),
@@ -528,6 +591,7 @@ class _GoalsDebtsScreenState extends State<GoalsDebtsScreen> with SingleTickerPr
   }
 
   Widget _buildDebtsTab() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return StreamBuilder<List<Debt>>(
       stream: FinanceRepository.instance.watchDebts(),
       builder: (context, snapshot) {
@@ -565,13 +629,13 @@ class _GoalsDebtsScreenState extends State<GoalsDebtsScreen> with SingleTickerPr
                   const SizedBox(height: 16),
                   Text(
                     'No active debts logged.',
-                    style: GoogleFonts.inter(fontWeight: FontWeight.w800, fontSize: 16, color: Colors.white),
+                    style: GoogleFonts.inter(fontWeight: FontWeight.w800, fontSize: 16, color: isDark ? Colors.white : RodMaeColors.navy),
                   ),
                   const SizedBox(height: 8),
                   Text(
                     'Enable "Split this Bill" when adding transactions to automatically track split debts here!',
                     textAlign: TextAlign.center,
-                    style: GoogleFonts.inter(color: RodMaeColors.textSoft, fontSize: 12),
+                    style: GoogleFonts.inter(color: isDark ? RodMaeColors.textSoft : RodMaeColors.navy.withValues(alpha: 0.7), fontSize: 12),
                   ),
                 ],
               ),
@@ -650,7 +714,7 @@ class _GoalsDebtsScreenState extends State<GoalsDebtsScreen> with SingleTickerPr
                       style: GoogleFonts.inter(
                         fontWeight: FontWeight.w800,
                         fontSize: 13,
-                        color: Colors.white,
+                        color: isDark ? Colors.white : RodMaeColors.navy,
                       ),
                     ),
                     const SizedBox(height: 4),
@@ -684,20 +748,25 @@ class _GoalsDebtsScreenState extends State<GoalsDebtsScreen> with SingleTickerPr
           Row(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
-              ElevatedButton.icon(
-                onPressed: () => _showSettleDebtDialog(debt),
-                icon: const Icon(Icons.payment_rounded, size: 14),
-                label: Text(
-                  isOwedToUs ? 'MARK AS PAID' : 'SETTLE PAYMENT',
-                  style: GoogleFonts.inter(fontWeight: FontWeight.w900, fontSize: 10, letterSpacing: 0.5),
-                ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: themeColor.withValues(alpha: 0.12),
-                  foregroundColor: themeColor,
-                  elevation: 0,
-                  side: BorderSide(color: themeColor.withValues(alpha: 0.3)),
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              AestheticPressScale(
+                onTap: () => _showSettleDebtDialog(debt),
+                child: ElevatedButton.icon(
+                  onPressed: null, // Managed by AestheticPressScale
+                  icon: const Icon(Icons.payment_rounded, size: 14),
+                  label: Text(
+                    isOwedToUs ? 'MARK AS PAID' : 'SETTLE PAYMENT',
+                    style: GoogleFonts.inter(fontWeight: FontWeight.w900, fontSize: 10, letterSpacing: 0.5),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: themeColor.withValues(alpha: 0.12),
+                    foregroundColor: themeColor,
+                    disabledBackgroundColor: themeColor.withValues(alpha: 0.12),
+                    disabledForegroundColor: themeColor,
+                    elevation: 0,
+                    side: BorderSide(color: themeColor.withValues(alpha: 0.3)),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
                 ),
               ),
             ],
